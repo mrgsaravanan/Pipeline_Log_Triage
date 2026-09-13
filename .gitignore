@@ -33,5 +33,9 @@ google-services.json
 # Android Profiling
 *.hprof
 
-# macOS
-.DS_Store
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/

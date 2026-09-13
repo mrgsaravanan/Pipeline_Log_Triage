@@ -106,9 +106,7 @@ def main() -> int:
         print("network error reaching the Anthropic API.", file=sys.stderr)
         return 1
 
-    for block in response.content:
-        if block.type == "text":
-            print(block.text)
+    print_report(response.parsed_output)
 
     return 0
 
