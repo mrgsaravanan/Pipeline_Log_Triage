@@ -99,6 +99,11 @@ def main() -> int:
     except anthropic.AuthenticationError:
         print("auth failed - set ANTHROPIC_API_KEY or run `ant auth login`.", file=sys.stderr)
         return 1
+    except TypeError as e:
+        if "Could not resolve authentication method" not in str(e):
+            raise
+        print("auth failed - set ANTHROPIC_API_KEY or run `ant auth login`.", file=sys.stderr)
+        return 1
     except anthropic.APIStatusError as e:
         print(f"API error ({e.status_code}): {e.message}", file=sys.stderr)
         return 1

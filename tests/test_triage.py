@@ -150,6 +150,17 @@ def test_main_prints_formatted_report_on_success(monkeypatch, capsys, tmp_path):
             anthropic.APIConnectionError(request=_fake_request()),
             "network error",
         ),
+        (
+            # Raised by the anthropic SDK itself (not a subclass of
+            # AuthenticationError) when no api_key/auth_token/credentials are
+            # configured at all - e.g. ANTHROPIC_API_KEY unset and no `ant
+            # auth login` session.
+            TypeError(
+                "Could not resolve authentication method. Expected one of "
+                "api_key, auth_token, or credentials to be set."
+            ),
+            "auth failed",
+        ),
     ],
 )
 def test_main_reports_api_errors_on_stderr(monkeypatch, capsys, tmp_path, exc, expected_substr):
@@ -163,3 +174,16 @@ def test_main_reports_api_errors_on_stderr(monkeypatch, capsys, tmp_path, exc, e
 
     assert main() == 1
     assert expected_substr in capsys.readouterr().err
+
+
+def test_main_reraises_unrelated_type_errors(monkeypatch, tmp_path):
+    log_file = tmp_path / "pipeline.log"
+    log_file.write_text("2024-01-01 ERROR something broke")
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+
+    mock_client = MagicMock()
+    mock_client.messages.parse.side_effect = TypeError("unrelated bug")
+    monkeypatch.setattr(Triage.anthropic, "Anthropic", lambda: mock_client)
+
+    with pytest.raises(TypeError, match="unrelated bug"):
+        main()
