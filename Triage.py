@@ -86,7 +86,7 @@ def main() -> int:
     try:
         response = client.messages.parse(
             model=MODEL,
-            max_tokens=280,
+            max_tokens=16000,
             system=SYSTEM_PROMPT,
             messages=[
                 {
