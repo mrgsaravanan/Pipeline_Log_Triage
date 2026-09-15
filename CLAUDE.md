@@ -18,9 +18,10 @@ pip install -r requirements-dev.txt
 python Triage.py sample_pipeline.log
 ```
 
-Requires `ANTHROPIC_API_KEY` in the environment (or an `ant auth login`
-profile). This makes a real, billed API call — never run it as part of the
-build/test gate below.
+Requires the `claude` CLI to be installed and authenticated (`claude
+login`) — this routes the request through the user's Claude subscription
+via `claude -p`, not a billed Anthropic API key. It still makes a real
+network call — never run it as part of the build/test gate below.
 
 ## Build / test gate
 
@@ -29,8 +30,9 @@ build/test gate below.
 ```
 
 Runs `ruff check .` then `pytest -q`. No network calls: every test that
-exercises `main()`'s API path monkeypatches `anthropic.Anthropic`, so the
-whole suite is free and deterministic. "Clean" means this script exits 0.
+exercises `main()`'s CLI-invocation path monkeypatches `subprocess.run`, so
+the whole suite is free and deterministic. "Clean" means this script exits
+0.
 
 ## Working conventions for Claude Code in this repo
 
@@ -42,7 +44,8 @@ whole suite is free and deterministic. "Clean" means this script exits 0.
 - If the build fails, do not commit or push. Fix the failure, or report it
   and stop.
 - Never run `Triage.py` against a real log as part of verifying a change —
-  it costs money and needs a live API key. Cover behavior with unit tests
-  (mocked client) instead.
-- Keep `requirements.txt` (runtime deps only) and `requirements-dev.txt`
-  (adds `pytest`, `ruff`, `httpx` for tests) separate.
+  it needs the `claude` CLI installed and authenticated, and makes a real
+  network call. Cover behavior with unit tests (mocked `subprocess.run`)
+  instead.
+- Keep `requirements.txt` (runtime deps only — just `pydantic`) and
+  `requirements-dev.txt` (adds `pytest`, `ruff` for tests) separate.

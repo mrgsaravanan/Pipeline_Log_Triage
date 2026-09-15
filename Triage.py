@@ -1,11 +1,18 @@
-"""Read a pipeline log file and ask Claude what actually broke."""
+"""Read a pipeline log file and ask Claude what actually broke.
 
+Routes through the `claude` CLI (a Claude Code / Claude subscription)
+instead of calling the Anthropic API directly with a billed API key.
+"""
+
+import json
+import subprocess
 import sys
 
-import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
-MODEL = "claude-opus-5"
+CLAUDE_CLI = "claude"
+MODEL = "claude-sonnet-5"
+CLI_TIMEOUT_SECONDS = 180
 
 SYSTEM_PROMPT = """You are a data pipeline on-call engineer triaging a failed run.
 
@@ -32,6 +39,21 @@ possibilities. Leave `notes` as an empty string if you have nothing to add.
 
 Be concise and concrete. Skip anything the log does not support."""
 
+JSON_RESPONSE_INSTRUCTIONS = """Respond with ONLY a single JSON object - no prose, no markdown
+code fences, no commentary before or after it - matching exactly this shape:
+
+{
+  "failures": [
+    {
+      "failure_type": "string",
+      "what_broke": "string",
+      "evidence": "string",
+      "next_step": "string"
+    }
+  ],
+  "notes": "string"
+}"""
+
 
 class Failure(BaseModel):
     failure_type: str
@@ -43,6 +65,61 @@ class Failure(BaseModel):
 class Triage(BaseModel):
     failures: list[Failure]
     notes: str
+
+
+class ClaudeCliError(RuntimeError):
+    """The claude CLI failed, or returned something we can't use."""
+
+
+def _strip_code_fence(text: str) -> str:
+    """Undo a ```/```json wrapper if the model added one despite being told not to."""
+    text = text.strip()
+    if not text.startswith("```"):
+        return text
+
+    lines = text.splitlines()
+    if len(lines) >= 2 and lines[-1].strip().startswith("```"):
+        lines = lines[1:-1]
+    else:
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def run_triage_via_claude_cli(log_path: str, log_text: str) -> Triage:
+    """Ask the claude CLI to triage a log, routed through the user's subscription."""
+    prompt = (
+        f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}\n\n"
+        f"Pipeline log from `{log_path}`:\n\n<log>\n{log_text}\n</log>"
+    )
+
+    result = subprocess.run(
+        [CLAUDE_CLI, "-p", prompt, "--model", MODEL, "--output-format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=CLI_TIMEOUT_SECONDS,
+    )
+
+    if result.returncode != 0:
+        raise ClaudeCliError(
+            result.stderr.strip() or f"claude exited with status {result.returncode}"
+        )
+
+    try:
+        envelope = json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise ClaudeCliError(f"could not parse claude CLI output as JSON: {e}") from e
+
+    if envelope.get("is_error"):
+        raise ClaudeCliError(str(envelope.get("result") or "claude reported an error"))
+
+    text = envelope.get("result")
+    if not text:
+        raise ClaudeCliError("claude CLI returned no result text")
+
+    try:
+        return Triage.model_validate_json(_strip_code_fence(text))
+    except ValidationError as e:
+        raise ClaudeCliError(f"claude's response did not match the expected schema: {e}") from e
 
 
 def print_report(triage: Triage) -> None:
@@ -81,37 +158,22 @@ def main() -> int:
         print(f"{log_path} is empty - nothing to triage.", file=sys.stderr)
         return 1
 
-    client = anthropic.Anthropic()
-
     try:
-        response = client.messages.parse(
-            model=MODEL,
-            max_tokens=16000,
-            system=SYSTEM_PROMPT,
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Pipeline log from `{log_path}`:\n\n<log>\n{log_text}\n</log>",
-                }
-            ],
-            output_format=Triage,
+        triage = run_triage_via_claude_cli(log_path, log_text)
+    except FileNotFoundError:
+        print(
+            "claude CLI not found - install Claude Code and run `claude login`.",
+            file=sys.stderr,
         )
-    except anthropic.AuthenticationError:
-        print("auth failed - set ANTHROPIC_API_KEY or run `ant auth login`.", file=sys.stderr)
         return 1
-    except TypeError as e:
-        if "Could not resolve authentication method" not in str(e):
-            raise
-        print("auth failed - set ANTHROPIC_API_KEY or run `ant auth login`.", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"claude CLI timed out after {CLI_TIMEOUT_SECONDS}s.", file=sys.stderr)
         return 1
-    except anthropic.APIStatusError as e:
-        print(f"API error ({e.status_code}): {e.message}", file=sys.stderr)
-        return 1
-    except anthropic.APIConnectionError:
-        print("network error reaching the Anthropic API.", file=sys.stderr)
+    except ClaudeCliError as e:
+        print(f"claude CLI error: {e}", file=sys.stderr)
         return 1
 
-    print_report(response.parsed_output)
+    print_report(triage)
 
     return 0
 

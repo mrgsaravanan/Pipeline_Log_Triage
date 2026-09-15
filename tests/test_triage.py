@@ -1,17 +1,14 @@
 """Unit tests for Triage.py.
 
-These tests never call the real Anthropic API: anthropic.Anthropic() is
-monkeypatched everywhere a client would be constructed, so the suite runs
-offline, deterministically, and for free.
+These tests never invoke the real `claude` CLI: subprocess.run is
+monkeypatched everywhere it would be called, so the suite runs offline,
+deterministically, and for free.
 """
 
+import json
+import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
-
-import anthropic
-import httpx
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -20,12 +17,14 @@ from Triage import Failure, main, print_report
 from Triage import Triage as TriageModel
 
 
-def _fake_request() -> httpx.Request:
-    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+def _cli_envelope(*, result: str, is_error: bool = False) -> str:
+    return json.dumps({"type": "result", "is_error": is_error, "result": result})
 
 
-def _fake_response(status_code: int) -> httpx.Response:
-    return httpx.Response(status_code, request=_fake_request())
+def _completed(stdout: str = "", stderr: str = "", returncode: int = 0):
+    return subprocess.CompletedProcess(
+        args=["claude"], returncode=returncode, stdout=stdout, stderr=stderr
+    )
 
 
 # --- print_report -----------------------------------------------------------
@@ -101,89 +100,122 @@ def test_main_rejects_empty_file(monkeypatch, capsys, tmp_path):
 # --- main(): success path, wired to print_report -----------------------------
 
 
-def test_main_prints_formatted_report_on_success(monkeypatch, capsys, tmp_path):
+def _write_log(tmp_path, monkeypatch):
     log_file = tmp_path / "pipeline.log"
     log_file.write_text("2024-01-01 ERROR something broke")
     monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+    return log_file
 
-    fake_triage = TriageModel(
-        failures=[
-            Failure(
-                failure_type="upstream schema drift",
-                what_broke="A column was dropped upstream.",
-                evidence="line 7",
-                next_step="Restore the column or update the consumer.",
-            )
-        ],
-        notes="",
+
+def test_main_prints_formatted_report_on_success(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+
+    payload = json.dumps(
+        {
+            "failures": [
+                {
+                    "failure_type": "upstream schema drift",
+                    "what_broke": "A column was dropped upstream.",
+                    "evidence": "line 7",
+                    "next_step": "Restore the column or update the consumer.",
+                }
+            ],
+            "notes": "",
+        }
     )
-    fake_response = MagicMock()
-    fake_response.parsed_output = fake_triage
-    fake_response.content = []
-
-    mock_client = MagicMock()
-    mock_client.messages.parse.return_value = fake_response
-    monkeypatch.setattr(Triage.anthropic, "Anthropic", lambda: mock_client)
+    fake_run = lambda *a, **k: _completed(stdout=_cli_envelope(result=payload))  # noqa: E731
+    monkeypatch.setattr(Triage.subprocess, "run", fake_run)
 
     assert main() == 0
     out = capsys.readouterr().out
     assert "upstream schema drift" in out
     assert "What broke: A column was dropped upstream." in out
-    mock_client.messages.parse.assert_called_once()
 
 
-# --- main(): API error handling ----------------------------------------------
+def test_main_strips_markdown_code_fence_from_result(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+
+    payload = json.dumps({"failures": [], "notes": "nothing broke"})
+    fenced = f"```json\n{payload}\n```"
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(stdout=_cli_envelope(result=fenced))
+    )
+
+    assert main() == 0
+    assert "Notes: nothing broke" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize(
-    "exc, expected_substr",
-    [
-        (
-            anthropic.AuthenticationError("bad key", response=_fake_response(401), body=None),
-            "auth failed",
-        ),
-        (
-            anthropic.APIStatusError("server error", response=_fake_response(500), body=None),
-            "API error (500)",
-        ),
-        (
-            anthropic.APIConnectionError(request=_fake_request()),
-            "network error",
-        ),
-        (
-            # Raised by the anthropic SDK itself (not a subclass of
-            # AuthenticationError) when no api_key/auth_token/credentials are
-            # configured at all - e.g. ANTHROPIC_API_KEY unset and no `ant
-            # auth login` session.
-            TypeError(
-                "Could not resolve authentication method. Expected one of "
-                "api_key, auth_token, or credentials to be set."
-            ),
-            "auth failed",
-        ),
-    ],
-)
-def test_main_reports_api_errors_on_stderr(monkeypatch, capsys, tmp_path, exc, expected_substr):
-    log_file = tmp_path / "pipeline.log"
-    log_file.write_text("2024-01-01 ERROR something broke")
-    monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+# --- main(): claude CLI failure handling -------------------------------------
 
-    mock_client = MagicMock()
-    mock_client.messages.parse.side_effect = exc
-    monkeypatch.setattr(Triage.anthropic, "Anthropic", lambda: mock_client)
+
+def test_main_reports_missing_cli(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+
+    def raise_not_found(*a, **k):
+        raise FileNotFoundError("claude")
+
+    monkeypatch.setattr(Triage.subprocess, "run", raise_not_found)
 
     assert main() == 1
-    assert expected_substr in capsys.readouterr().err
+    assert "claude CLI not found" in capsys.readouterr().err
 
 
-def test_main_reraises_unrelated_type_errors(monkeypatch, tmp_path):
-    log_file = tmp_path / "pipeline.log"
-    log_file.write_text("2024-01-01 ERROR something broke")
-    monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+def test_main_reports_timeout(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
 
-    mock_client = MagicMock()
-    mock_client.messages.parse.side_effect = TypeError("unrelated bug")
-    monkeypatch.setattr(Triage.anthropic, "Anthropic", lambda: mock_client)
+    def raise_timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd=["claude"], timeout=180)
 
-    with pytest.raises(TypeError, match="unrelated bug"):
-        main()
+    monkeypatch.setattr(Triage.subprocess, "run", raise_timeout)
+
+    assert main() == 1
+    assert "timed out" in capsys.readouterr().err
+
+
+def test_main_reports_nonzero_exit(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        Triage.subprocess,
+        "run",
+        lambda *a, **k: _completed(returncode=1, stderr="not logged in"),
+    )
+
+    assert main() == 1
+    assert "not logged in" in capsys.readouterr().err
+
+
+def test_main_reports_is_error_envelope(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        Triage.subprocess,
+        "run",
+        lambda *a, **k: _completed(stdout=_cli_envelope(result="rate limited", is_error=True)),
+    )
+
+    assert main() == 1
+    assert "rate limited" in capsys.readouterr().err
+
+
+def test_main_reports_malformed_outer_json(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(Triage.subprocess, "run", lambda *a, **k: _completed(stdout="not json"))
+
+    assert main() == 1
+    assert "could not parse claude CLI output as JSON" in capsys.readouterr().err
+
+
+def test_main_reports_schema_mismatch(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+
+    bad_payload = json.dumps({"unexpected": "shape"})
+    monkeypatch.setattr(
+        Triage.subprocess,
+        "run",
+        lambda *a, **k: _completed(stdout=_cli_envelope(result=bad_payload)),
+    )
+
+    assert main() == 1
+    assert "did not match the expected schema" in capsys.readouterr().err
