@@ -14,6 +14,15 @@ CLAUDE_CLI = "claude"
 MODEL = "claude-sonnet-5"
 CLI_TIMEOUT_SECONDS = 180
 
+# Keep the log within a size that's safe to pass as a single CLI argument and
+# comfortably inside the model's context window. Bias toward keeping both
+# ends of the file: a pipeline failure tends to show up either near the
+# start (a connection/auth failure) or the end (the task that actually
+# broke), so a head+tail excerpt is more useful than a head-only one.
+MAX_LOG_CHARS = 200_000
+TRUNCATE_HEAD_CHARS = 120_000
+TRUNCATE_TAIL_CHARS = 60_000
+
 SYSTEM_PROMPT = """You are a data pipeline on-call engineer triaging a failed run.
 
 Given a raw pipeline log, break the run down into its distinct failures. A
@@ -69,6 +78,37 @@ class Triage(BaseModel):
 
 class ClaudeCliError(RuntimeError):
     """The claude CLI failed, or returned something we can't use."""
+
+
+def _read_log_file(log_path: str) -> tuple[str, bool]:
+    """Read a log file, tolerating a non-UTF-8 encoding.
+
+    Most pipeline logs are UTF-8, but some tools emit legacy encodings
+    (Windows-1252, Latin-1) with the odd curly quote or accented character.
+    Fall back to Latin-1 - which can decode any byte sequence - rather than
+    crashing with a raw UnicodeDecodeError. A genuinely unreadable file
+    (missing, no permission) is a separate OSError case the caller handles.
+
+    Returns (text, used_fallback_encoding).
+    """
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            return f.read(), False
+    except UnicodeDecodeError:
+        with open(log_path, encoding="latin-1") as f:
+            return f.read(), True
+
+
+def _truncate_log_text(log_text: str) -> tuple[str, bool]:
+    """Cap log size with a head+tail excerpt. Returns (text, was_truncated)."""
+    if len(log_text) <= MAX_LOG_CHARS:
+        return log_text, False
+
+    head = log_text[:TRUNCATE_HEAD_CHARS]
+    tail = log_text[-TRUNCATE_TAIL_CHARS:] if TRUNCATE_TAIL_CHARS else ""
+    omitted = len(log_text) - len(head) - len(tail)
+    marker = f"\n\n[... {omitted:,} characters omitted from the middle of this log ...]\n\n"
+    return head + marker + tail, True
 
 
 def _strip_code_fence(text: str) -> str:
@@ -148,15 +188,29 @@ def main() -> int:
 
     log_path = sys.argv[1]
     try:
-        with open(log_path, encoding="utf-8") as f:
-            log_text = f.read()
+        log_text, used_fallback_encoding = _read_log_file(log_path)
     except OSError as e:
         print(f"could not read {log_path}: {e}", file=sys.stderr)
         return 1
 
+    if used_fallback_encoding:
+        print(
+            f"note: {log_path} is not valid UTF-8; decoded as Latin-1 instead. "
+            "Some characters may be misrendered.",
+            file=sys.stderr,
+        )
+
     if not log_text.strip():
         print(f"{log_path} is empty - nothing to triage.", file=sys.stderr)
         return 1
+
+    log_text, was_truncated = _truncate_log_text(log_text)
+    if was_truncated:
+        print(
+            f"note: {log_path} is large; sending a truncated head+tail "
+            "excerpt to the model instead of the full file.",
+            file=sys.stderr,
+        )
 
     try:
         triage = run_triage_via_claude_cli(log_path, log_text)

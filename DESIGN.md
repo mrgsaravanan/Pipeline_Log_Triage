@@ -79,6 +79,46 @@ file, a missing/timed-out/failing `claude` CLI, or a response that doesn't
 parse as valid JSON or doesn't match the `Triage` schema (each with a
 one-line message on stderr).
 
+## Log varieties
+
+The script treats the log as opaque text and lets the model do all the
+interpretation, so it already handles differently-shaped logs (line-oriented,
+JSON-lines, embedded multi-line stack traces) without any format-specific
+parsing. Two robustness gaps in the *file-handling* layer (not the model)
+were found and addressed:
+
+- **Non-UTF-8 encodings.** `open(log_path, encoding="utf-8")` used to crash
+  with a raw, uncaught `UnicodeDecodeError` on any legacy-encoded log
+  (Windows-1252/Latin-1 tools emitting an accented character, say). Fixed
+  with a two-step read (`_read_log_file`): try UTF-8, fall back to Latin-1 -
+  which can decode any byte sequence - and print a one-line stderr note when
+  that fallback is used.
+  - **Known gap, accepted as-is:** this two-step fallback only handles
+    single-byte legacy encodings correctly. A **UTF-16-encoded log** doesn't
+    trigger the fallback path at all, because Latin-1 decoding never raises
+    - it just silently decodes the interleaved-null-byte UTF-16 bytes into
+    mojibake, with no warning printed (the code only warns when UTF-8
+    *fails*, and here Latin-1 "succeeds," just on the wrong data). The model
+    would receive garbled text with no signal to the user that the root
+    cause was encoding detection rather than a real content problem. Closing
+    this needs a BOM check (`\xff\xfe` / `\xfe\xff` at the start of the file)
+    before falling back to Latin-1 - not implemented, since it was flagged as
+    an edge case and explicitly deferred rather than folded into that change.
+- **Oversized logs.** No size guard existed. A very large log risks hitting
+  OS argument-length limits (the whole prompt is passed as a single `claude
+  -p` argument) or needlessly blowing through context/cost. Fixed with
+  `_truncate_log_text`: caps at `MAX_LOG_CHARS` (200k), keeping a head+tail
+  excerpt (a failure tends to show up near the start or the end of a run,
+  not necessarily in a middle section that gets cut) with an explicit
+  `[... N characters omitted ...]` marker embedded in the log text itself,
+  plus a one-line stderr note.
+
+New fixtures added to validate these and other varieties (`sample_json_lines.log`,
+a JSON-lines structured log; `sample_stacktrace.log`, a multi-line Python
+traceback embedded in an otherwise normal log; `sample_latin1.log`, a
+genuinely Latin-1-encoded file) - none tracked in git, same as the other
+`.log` fixtures.
+
 ## Multi-failure fixture
 
 `sample_pipeline.log` deliberately exercises the single-failure path only:

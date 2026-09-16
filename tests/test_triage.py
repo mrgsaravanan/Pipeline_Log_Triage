@@ -27,6 +27,89 @@ def _completed(stdout: str = "", stderr: str = "", returncode: int = 0):
     )
 
 
+# --- _read_log_file: multiple log encodings ----------------------------------
+
+
+def test_read_log_file_reads_utf8_normally(tmp_path):
+    log_file = tmp_path / "utf8.log"
+    log_file.write_text("café — 2026-09-11 ERROR extract failed", encoding="utf-8")
+
+    text, used_fallback = Triage._read_log_file(str(log_file))
+
+    assert used_fallback is False
+    assert "café" in text
+
+
+def test_read_log_file_falls_back_to_latin1_on_invalid_utf8(tmp_path):
+    log_file = tmp_path / "legacy.log"
+    log_file.write_bytes("café ERROR pull_client_file failed".encode("latin-1"))
+
+    text, used_fallback = Triage._read_log_file(str(log_file))
+
+    assert used_fallback is True
+    assert "café" in text
+
+
+# --- _truncate_log_text: oversized logs --------------------------------------
+
+
+def test_truncate_log_text_leaves_short_text_unchanged():
+    short_text = "small log, well under the cap"
+
+    text, was_truncated = Triage._truncate_log_text(short_text)
+
+    assert was_truncated is False
+    assert text == short_text
+
+
+def test_truncate_log_text_keeps_head_and_tail_of_oversized_text():
+    head_marker = "HEAD_MARKER_START"
+    tail_marker = "TAIL_MARKER_END"
+    middle_filler = "x" * (Triage.MAX_LOG_CHARS + 1000)
+    huge_text = head_marker + middle_filler + tail_marker
+
+    text, was_truncated = Triage._truncate_log_text(huge_text)
+
+    assert was_truncated is True
+    assert text.startswith(head_marker)
+    assert text.endswith(tail_marker)
+    assert "omitted" in text
+    assert len(text) < len(huge_text)
+
+
+# --- main(): encoding/truncation notes surfaced on stderr --------------------
+
+
+def test_main_notes_encoding_fallback_but_still_succeeds(monkeypatch, capsys, tmp_path):
+    log_file = tmp_path / "legacy.log"
+    log_file.write_bytes("café ERROR something broke".encode("latin-1"))
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+
+    payload = json.dumps({"failures": [], "notes": "nothing broke"})
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(stdout=_cli_envelope(result=payload))
+    )
+
+    assert main() == 0
+    err = capsys.readouterr().err
+    assert "not valid UTF-8" in err
+
+
+def test_main_notes_truncation_but_still_succeeds(monkeypatch, capsys, tmp_path):
+    log_file = tmp_path / "huge.log"
+    log_file.write_text("x" * (Triage.MAX_LOG_CHARS + 1000))
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+
+    payload = json.dumps({"failures": [], "notes": "nothing broke"})
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(stdout=_cli_envelope(result=payload))
+    )
+
+    assert main() == 0
+    err = capsys.readouterr().err
+    assert "large" in err
+
+
 # --- print_report -----------------------------------------------------------
 
 
