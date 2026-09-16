@@ -23,6 +23,9 @@ login`) — this routes the request through the user's Claude subscription
 via `claude -p`, not a billed Anthropic API key. It still makes a real
 network call — never run it as part of the build/test gate below.
 
+Each successful run also appends a record to `.triage_history.jsonl`
+(local, gitignored, unbounded — see DESIGN.md's "Persistence" section).
+
 ## Build / test gate
 
 ```bash

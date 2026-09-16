@@ -39,3 +39,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .ruff_cache/
+
+# Local triage run history (see Triage.py HISTORY_FILE) - per-machine, not shared
+.triage_history.jsonl

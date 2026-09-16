@@ -7,12 +7,23 @@ instead of calling the Anthropic API directly with a billed API key.
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 from pydantic import BaseModel, ValidationError
 
 CLAUDE_CLI = "claude"
 MODEL = "claude-sonnet-5"
 CLI_TIMEOUT_SECONDS = 180
+
+# The only thing that persists between separate runs of this script. Every
+# other piece of state - the raw log text, the built prompt, the claude CLI
+# subprocess and its response - lives only within one run and is discarded
+# when the process exits; there's no reason for any of that to survive past
+# printing the report. This file is a plain append-only log of completed
+# triages: local, human-inspectable, and not synced anywhere (see
+# .gitignore). It is not yet read back in anywhere (no retrieval/few-shot
+# step) - it's the persistence layer a future retrieval step would build on.
+HISTORY_FILE = ".triage_history.jsonl"
 
 # Keep the log within a size that's safe to pass as a single CLI argument and
 # comfortably inside the model's context window. Bias toward keeping both
@@ -162,6 +173,27 @@ def run_triage_via_claude_cli(log_path: str, log_text: str) -> Triage:
         raise ClaudeCliError(f"claude's response did not match the expected schema: {e}") from e
 
 
+def _append_history(log_path: str, triage: Triage) -> None:
+    """Best-effort: append this run's result to the local history file.
+
+    A failure to write history is reported but does not fail the triage
+    itself - the user already has their report on stdout, and losing one
+    history line is much less disruptive than losing the report they asked
+    for.
+    """
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "log_path": log_path,
+        "model": MODEL,
+        "triage": triage.model_dump(),
+    }
+    try:
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError as e:
+        print(f"note: could not write to history file {HISTORY_FILE}: {e}", file=sys.stderr)
+
+
 def print_report(triage: Triage) -> None:
     if len(triage.failures) > 1:
         print(f"{len(triage.failures)} distinct failures found.\n")
@@ -228,6 +260,7 @@ def main() -> int:
         return 1
 
     print_report(triage)
+    _append_history(log_path, triage)
 
     return 0
 

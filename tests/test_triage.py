@@ -10,11 +10,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import Triage
 from Triage import Failure, main, print_report
 from Triage import Triage as TriageModel
+
+
+@pytest.fixture(autouse=True)
+def _isolated_history_file(monkeypatch, tmp_path):
+    """Every test gets its own history file so runs don't pollute the repo
+    or leak state between tests. Tests of the failure path override this."""
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(tmp_path / "history.jsonl"))
 
 
 def _cli_envelope(*, result: str, is_error: bool = False) -> str:
@@ -226,6 +235,77 @@ def test_main_strips_markdown_code_fence_from_result(monkeypatch, capsys, tmp_pa
 
     assert main() == 0
     assert "Notes: nothing broke" in capsys.readouterr().out
+
+
+# --- persistence: history file ------------------------------------------------
+
+
+def test_append_history_writes_one_jsonl_record(monkeypatch, tmp_path):
+    history_file = tmp_path / "history.jsonl"
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(history_file))
+
+    triage = TriageModel(
+        failures=[
+            Failure(failure_type="X", what_broke="y", evidence="z", next_step="w")
+        ],
+        notes="",
+    )
+    Triage._append_history("some.log", triage)
+
+    lines = history_file.read_text().splitlines()
+    assert len(lines) == 1
+
+    record = json.loads(lines[0])
+    assert record["log_path"] == "some.log"
+    assert record["model"] == Triage.MODEL
+    assert record["triage"]["failures"][0]["failure_type"] == "X"
+    # timestamp should be a real, parseable ISO-8601 datetime
+    from datetime import datetime
+
+    datetime.fromisoformat(record["timestamp"])
+
+
+def test_main_appends_history_record_on_success(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+    history_file = Path(Triage.HISTORY_FILE)
+
+    payload = json.dumps(
+        {
+            "failures": [
+                {
+                    "failure_type": "upstream schema drift",
+                    "what_broke": "A column was dropped upstream.",
+                    "evidence": "line 7",
+                    "next_step": "Restore the column.",
+                }
+            ],
+            "notes": "",
+        }
+    )
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(stdout=_cli_envelope(result=payload))
+    )
+
+    assert main() == 0
+    record = json.loads(history_file.read_text().splitlines()[0])
+    assert record["triage"]["failures"][0]["failure_type"] == "upstream schema drift"
+
+
+def test_main_still_succeeds_when_history_write_fails(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+    # Point HISTORY_FILE at a directory: opening it for append raises OSError
+    # (IsADirectoryError), independent of filesystem permissions.
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(tmp_path))
+
+    payload = json.dumps({"failures": [], "notes": "nothing broke"})
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(stdout=_cli_envelope(result=payload))
+    )
+
+    assert main() == 0
+    captured = capsys.readouterr()
+    assert "Notes: nothing broke" in captured.out
+    assert "could not write to history file" in captured.err
 
 
 # --- main(): claude CLI failure handling -------------------------------------

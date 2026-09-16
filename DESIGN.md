@@ -3,14 +3,17 @@
 ## What the script does today
 
 `Triage.py` is a single-shot CLI. It reads one pipeline log file off disk,
-sends the whole file to Claude in one request via the `claude` CLI, and
-prints the triage back to stdout. There is no loop, no tool use, no state
-between runs.
+sends the whole file to Claude in one request via the `claude` CLI, prints
+the triage back to stdout, and appends a record of the result to a local
+history file. There is no loop, no tool use, and no multi-turn conversation
+- each invocation is one independent triage - but a thin layer of state
+does now persist across separate invocations (see "Persistence" below).
 
 Flow:
 
 1. Validate argv - exactly one argument, the log path.
-2. Read the file as UTF-8; bail if unreadable or blank after `strip()`.
+2. Read the file (tolerating a non-UTF-8 encoding, see "Log varieties"
+   below); bail if unreadable or blank after `strip()`.
 3. Build a single prompt: the on-call-engineer system prompt, explicit
    instructions to respond with only a JSON object matching the `Triage`
    shape, and the log wrapped in a `<log>` tag with its path.
@@ -20,7 +23,8 @@ Flow:
 5. Parse the CLI's JSON envelope, pull out its `result` field, strip a
    markdown code fence if the model added one anyway, and validate it
    against the `Triage` pydantic model.
-6. Print the result via `print_report()`.
+6. Print the result via `print_report()`, then append it to the local
+   history file via `_append_history()`.
 
 The system prompt asks Claude to break the run into **distinct failures** -
 one entry per root cause. Downstream noise (tasks that only failed because an
@@ -118,6 +122,43 @@ a JSON-lines structured log; `sample_stacktrace.log`, a multi-line Python
 traceback embedded in an otherwise normal log; `sample_latin1.log`, a
 genuinely Latin-1-encoded file) - none tracked in git, same as the other
 `.log` fixtures.
+
+## Persistence: session state vs. local state
+
+Explicit design decision on what needs to survive a single run of this
+script versus what only needs to exist within it:
+
+- **Within one run only (discarded on exit):** the raw log text, the
+  assembled prompt, the `claude` CLI subprocess and its JSON envelope
+  response. None of this is useful once the report has been printed - there
+  is no conversation to continue and no reason to keep it around.
+- **Persisted across runs:** a compact record of each completed triage,
+  appended to `.triage_history.jsonl` (one JSON object per line) via
+  `_append_history()`: a UTC timestamp, the log path, the model used, and
+  the full `Triage` result (all `failures` plus `notes`). This is a local,
+  per-machine file - gitignored, not synced anywhere, human-inspectable
+  with any JSON-lines tool.
+
+This is deliberately just the persistence layer, not a retrieval/RAG loop:
+nothing reads `.triage_history.jsonl` back in today. A natural next step
+would be, before triaging a new log, to search this file for past runs with
+a similar `failure_type`/`evidence` and pass a few in as few-shot context -
+useful for recognizing a recurring failure faster or more consistently -
+but that wasn't built here; only the persistence half was in scope.
+
+Writing history is best-effort: `_append_history()` catches `OSError` (e.g.
+an unwritable path) and prints a one-line stderr note rather than failing
+the whole command - the user's report on stdout is the primary deliverable,
+and losing one history line is far less disruptive than losing that.
+
+**Known gap, accepted as-is:** the history file has no rotation, size cap,
+or pruning - it grows unbounded, one line per run, forever. Fine for a
+personal debugging tool run occasionally by hand; a real problem if this
+ever ran unattended or very frequently (e.g. on every pipeline failure in
+a busy system). Left unfixed since it wasn't asked for and would be scope
+creep beyond "decide what persists and wire it up" - worth adding (e.g. cap
+at the last N records, or prune by age) before this runs in any automated
+context.
 
 ## Multi-failure fixture
 
