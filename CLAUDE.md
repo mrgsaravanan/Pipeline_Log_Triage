@@ -37,6 +37,20 @@ exercises `main()`'s CLI-invocation path monkeypatches `subprocess.run`, so
 the whole suite is free and deterministic. "Clean" means this script exits
 0.
 
+## Web frontend (Azure App Service)
+
+[`azure_app/`](azure_app/README.md) is a separate FastAPI web wrapper around
+`Triage.py` (paste/upload a log, see the report as HTML), deployed to Azure
+App Service as a custom Docker container — not covered by `scripts/build.sh`
+or the auto-push rule below in the same way (it has its own
+`requirements.txt` and Dockerfile). See its README for the deployment
+architecture, the credential-handling design (why App Service not
+Functions, why the `claude` CLI credential is injected at container startup
+rather than baked into the image), and known limitations. `ruff`/`pytest`
+from the root build gate do cover `azure_app/main.py`'s syntax/lint, but
+there's no automated test coverage of the FastAPI endpoints themselves yet
+— verified only via a manual local smoke test so far.
+
 ## Working conventions for Claude Code in this repo
 
 - After any change, run `./scripts/build.sh` before considering the change
