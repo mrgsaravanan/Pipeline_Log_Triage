@@ -17,7 +17,7 @@ Flow:
 3. Build a single prompt: the on-call-engineer system prompt, explicit
    instructions to respond with only a JSON object matching the `Triage`
    shape, and the log wrapped in a `<log>` tag with its path.
-4. Run `claude -p "<prompt>" --model claude-sonnet-5 --output-format json`
+4. Run `claude -p "<prompt>" --model claude-haiku-4-5 --output-format json`
    as a subprocess. This routes the request through the user's Claude
    subscription (`claude login`) rather than a billed Anthropic API key.
 5. Parse the CLI's JSON envelope, pull out its `result` field, strip a

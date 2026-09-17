@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, ValidationError
 
 CLAUDE_CLI = "claude"
-MODEL = "claude-sonnet-5"
+MODEL = "claude-haiku-4-5"
 CLI_TIMEOUT_SECONDS = 180
 
 # The only thing that persists between separate runs of this script. Every
