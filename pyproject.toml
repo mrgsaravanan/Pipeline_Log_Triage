@@ -4,3 +4,8 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+# Vercel: serve the FastAPI app that lives in azure_app/main.py (module path
+# form; see https://vercel.com/docs/frameworks/backend/fastapi).
+[tool.vercel]
+entrypoint = "azure_app.main:app"

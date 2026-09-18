@@ -1,10 +1,13 @@
 """Read a pipeline log file and ask Claude what actually broke.
 
-Routes through the `claude` CLI (a Claude Code / Claude subscription)
-instead of calling the Anthropic API directly with a billed API key.
+Locally this routes through the `claude` CLI (a Claude Code / Claude
+subscription) rather than a billed API key. In a hosted environment (Vercel,
+or TRIAGE_BACKEND=api) it calls the Anthropic API instead, since a serverless
+function can't hold an interactive `claude login` session.
 """
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -14,6 +17,13 @@ from pydantic import BaseModel, ValidationError
 CLAUDE_CLI = "claude"
 MODEL = "claude-haiku-4-5"
 CLI_TIMEOUT_SECONDS = 180
+
+# Hosted (API) backend. The timeout stays under the 60s Vercel maxDuration set
+# in vercel.json, so a slow call fails with our message rather than a platform
+# kill. max_tokens is generous: a too-small value once truncated a multi-failure
+# reply mid-JSON (see DESIGN.md history), and we only pay for tokens generated.
+API_TIMEOUT_SECONDS = 50.0
+API_MAX_TOKENS = 8192
 
 # The only thing that persists between separate runs of this script. Every
 # other piece of state - the raw log text, the built prompt, the claude CLI
@@ -91,6 +101,11 @@ class ClaudeCliError(RuntimeError):
     """The claude CLI failed, or returned something we can't use."""
 
 
+class ClaudeApiError(ClaudeCliError):
+    """The hosted (Anthropic API) backend failed. Subclasses ClaudeCliError so
+    callers that already handle backend failures keep working unchanged."""
+
+
 def _read_log_file(log_path: str) -> tuple[str, bool]:
     """Read a log file, tolerating a non-UTF-8 encoding.
 
@@ -136,11 +151,82 @@ def _strip_code_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _log_message(log_path: str, log_text: str) -> str:
+    return f"Pipeline log from `{log_path}`:\n\n<log>\n{log_text}\n</log>"
+
+
+def _parse_triage_text(text: str) -> Triage:
+    """Validate the model's JSON reply (either backend) against the Triage schema."""
+    try:
+        return Triage.model_validate_json(_strip_code_fence(text))
+    except ValidationError as e:
+        raise ClaudeCliError(f"claude's response did not match the expected schema: {e}") from e
+
+
+def _triage_backend() -> str:
+    """'cli' (local, subscription) or 'api' (hosted, billed API key).
+
+    TRIAGE_BACKEND wins if set. Otherwise the hosted case is detected via
+    Vercel's automatic VERCEL env var, so local dev stays CLI-based with no
+    configuration and a Vercel deploy needs no extra switch.
+    """
+    explicit = os.environ.get("TRIAGE_BACKEND", "").strip().lower()
+    if explicit:
+        return explicit
+    return "api" if os.environ.get("VERCEL") else "cli"
+
+
+def run_triage(log_path: str, log_text: str) -> Triage:
+    """Triage a log via whichever backend this environment uses."""
+    backend = _triage_backend()
+    if backend == "api":
+        return run_triage_via_api(log_path, log_text)
+    if backend == "cli":
+        return run_triage_via_claude_cli(log_path, log_text)
+    raise ClaudeCliError(f"unknown TRIAGE_BACKEND {backend!r} (expected 'cli' or 'api')")
+
+
+def run_triage_via_api(log_path: str, log_text: str) -> Triage:
+    """Ask Claude via the Anthropic API (billed ANTHROPIC_API_KEY) - for hosted use.
+
+    Same prompt as the CLI path; only the transport differs. `anthropic` is
+    imported lazily so CLI-only local use never needs it at import time.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise ClaudeApiError("ANTHROPIC_API_KEY is not set in this environment")
+
+    import anthropic
+
+    client = anthropic.Anthropic(timeout=API_TIMEOUT_SECONDS, max_retries=1)
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=API_MAX_TOKENS,
+            system=f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}",
+            messages=[{"role": "user", "content": _log_message(log_path, log_text)}],
+        )
+    except anthropic.AuthenticationError as e:
+        raise ClaudeApiError("Anthropic API rejected the API key (check ANTHROPIC_API_KEY)") from e
+    except anthropic.APIStatusError as e:
+        raise ClaudeApiError(f"Anthropic API error ({e.status_code}): {e.message}") from e
+    except anthropic.APIConnectionError as e:
+        raise ClaudeApiError("could not reach the Anthropic API (network error)") from e
+
+    if response.stop_reason == "max_tokens":
+        # A cut-off reply is truncated JSON - fail clearly rather than with a parse error.
+        raise ClaudeApiError("response was truncated at max_tokens; raise API_MAX_TOKENS")
+
+    text = "".join(block.text for block in response.content if block.type == "text")
+    if not text.strip():
+        raise ClaudeApiError("Anthropic API returned no text")
+    return _parse_triage_text(text)
+
+
 def run_triage_via_claude_cli(log_path: str, log_text: str) -> Triage:
     """Ask the claude CLI to triage a log, routed through the user's subscription."""
     prompt = (
         f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}\n\n"
-        f"Pipeline log from `{log_path}`:\n\n<log>\n{log_text}\n</log>"
+        f"{_log_message(log_path, log_text)}"
     )
 
     result = subprocess.run(
@@ -167,10 +253,7 @@ def run_triage_via_claude_cli(log_path: str, log_text: str) -> Triage:
     if not text:
         raise ClaudeCliError("claude CLI returned no result text")
 
-    try:
-        return Triage.model_validate_json(_strip_code_fence(text))
-    except ValidationError as e:
-        raise ClaudeCliError(f"claude's response did not match the expected schema: {e}") from e
+    return _parse_triage_text(text)
 
 
 def _append_history(log_path: str, triage: Triage) -> None:
@@ -245,7 +328,7 @@ def main() -> int:
         )
 
     try:
-        triage = run_triage_via_claude_cli(log_path, log_text)
+        triage = run_triage(log_path, log_text)
     except FileNotFoundError:
         print(
             "claude CLI not found - install Claude Code and run `claude login`.",
@@ -254,6 +337,9 @@ def main() -> int:
         return 1
     except subprocess.TimeoutExpired:
         print(f"claude CLI timed out after {CLI_TIMEOUT_SECONDS}s.", file=sys.stderr)
+        return 1
+    except ClaudeApiError as e:
+        print(f"API error: {e}", file=sys.stderr)
         return 1
     except ClaudeCliError as e:
         print(f"claude CLI error: {e}", file=sys.stderr)

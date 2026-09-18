@@ -23,6 +23,10 @@ login`) — this routes the request through the user's Claude subscription
 via `claude -p`, not a billed Anthropic API key. It still makes a real
 network call — never run it as part of the build/test gate below.
 
+The backend is chosen by `Triage.run_triage`: `cli` by default, `api`
+(billed `ANTHROPIC_API_KEY`) when `TRIAGE_BACKEND=api` or on Vercel (which
+sets `VERCEL` automatically). Local dev never needs the API path.
+
 Each successful run also appends a record to `.triage_history.jsonl`
 (local, gitignored, unbounded — see DESIGN.md's "Persistence" section).
 
@@ -51,6 +55,14 @@ from the root build gate do cover `azure_app/main.py`'s syntax/lint, but
 there's no automated test coverage of the FastAPI endpoints themselves yet
 — verified only via a manual local smoke test so far.
 
+## Web frontend (Vercel)
+
+The same FastAPI app also deploys to Vercel (config: `[tool.vercel]` in
+`pyproject.toml`, `vercel.json`). There it uses the API backend. See
+[VERCEL.md](VERCEL.md) for the steps only the owner can do (API key + spend
+cap, Vercel project, env vars) and the security notes. Never commit an API
+key; `TRIAGE_ACCESS_CODE` should be set on any public deployment.
+
 ## Working conventions for Claude Code in this repo
 
 - After any change, run `./scripts/build.sh` before considering the change
@@ -64,5 +76,7 @@ there's no automated test coverage of the FastAPI endpoints themselves yet
   it needs the `claude` CLI installed and authenticated, and makes a real
   network call. Cover behavior with unit tests (mocked `subprocess.run`)
   instead.
-- Keep `requirements.txt` (runtime deps only — just `pydantic`) and
-  `requirements-dev.txt` (adds `pytest`, `ruff` for tests) separate.
+- Keep `requirements.txt` (runtime deps: `pydantic` for the CLI, plus
+  `anthropic`/`fastapi`/`python-multipart` for the hosted web app — Vercel
+  installs this file) and `requirements-dev.txt` (adds `pytest`, `ruff`)
+  separate.

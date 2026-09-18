@@ -83,6 +83,31 @@ file, a missing/timed-out/failing `claude` CLI, or a response that doesn't
 parse as valid JSON or doesn't match the `Triage` schema (each with a
 one-line message on stderr).
 
+## Backends: local CLI vs. hosted API
+
+`run_triage()` picks the transport; the prompt, JSON schema, and validation
+are shared (`_log_message`, `_parse_triage_text`), so the two paths differ
+only in how the request is sent:
+
+- **`cli` (default, local):** `claude -p ...` subprocess, billed to the
+  user's Claude subscription.
+- **`api` (Vercel, or `TRIAGE_BACKEND=api`):** `anthropic` SDK
+  `messages.create` with a billed `ANTHROPIC_API_KEY`. Needed because a
+  serverless function can't hold an interactive `claude login` session.
+  `anthropic` is imported lazily, so the local CLI never needs it. SDK
+  failures map to `ClaudeApiError` (a `ClaudeCliError` subclass) with clean
+  one-line messages; a `max_tokens` stop is reported as truncation rather
+  than surfacing as a confusing JSON parse error.
+
+The web app has an optional shared access code (`TRIAGE_ACCESS_CODE`):
+unset means open, set means submissions must include it. It is a speed bump
+against drive-by cost abuse, not real authentication or rate limiting - the
+Anthropic Console spend cap is the actual backstop.
+
+Not implemented: rate limiting (serverless instances are stateless, so an
+in-process limiter would be ineffective), and history persistence on Vercel
+(the filesystem is read-only; `_append_history` fails soft with a stderr note).
+
 ## Log varieties
 
 The script treats the log as opaque text and lets the model do all the
