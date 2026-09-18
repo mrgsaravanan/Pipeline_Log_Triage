@@ -4,5 +4,10 @@
     "azure_app/main.py": {
       "maxDuration": 60
     }
+  },
+  "git": {
+    "deploymentEnabled": {
+      "rag-vector-search": false
+    }
   }
 }

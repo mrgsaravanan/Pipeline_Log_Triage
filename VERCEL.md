@@ -41,3 +41,7 @@ truncation cap) is about $0.05. The Vercel Hobby tier itself is free.
   less on Haiku). Accuracy depends on how legible the screenshot is.
 - Not yet verified on a real Vercel deployment - the first deploy may need
   tweaks (see the checklist above and report any build error).
+
+- The `rag-vector-search` branch (local vector-search experiment) has its Vercel
+  auto-deploys switched off via `git.deploymentEnabled` in `vercel.json`. Remove that
+  entry if the branch is ever merged to `main`.
