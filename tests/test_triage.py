@@ -7,6 +7,7 @@ deterministically, and for free.
 
 import base64
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -756,3 +757,207 @@ def test_web_image_upload_still_respects_access_code(monkeypatch):
 
     assert "Incorrect access code" in html
     assert client.calls == []
+
+
+# --- optional local vector search (RAG) ---------------------------------------
+# Offline: the heavy pieces (chromadb, sentence-transformers) are faked or
+# skipped, so this suite stays fast and needs neither package installed.
+
+SIMILAR = [
+    {"title": "Out of memory in a transform", "text": "MemoryError ...", "source": "catalog",
+     "distance": 0.30},
+    {"title": "Past run: S3 access denied", "text": "AccessDenied ...", "source": "history",
+     "distance": 0.45},
+]
+
+
+@pytest.fixture(autouse=True)
+def _rag_off_by_default(monkeypatch):
+    monkeypatch.delenv("TRIAGE_RAG", raising=False)
+
+
+def test_rag_is_off_by_default_and_never_retrieves(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("retrieval must not run when TRIAGE_RAG is unset")
+
+    monkeypatch.setattr(Triage, "_retrieve_similar", boom)
+    assert Triage._similar_cases_for("ERROR x") == ""
+
+
+@pytest.mark.parametrize("value, enabled", [("1", True), ("true", True), ("YES", True),
+                                            ("0", False), ("", False), ("nope", False)])
+def test_rag_enabled_flag(monkeypatch, value, enabled):
+    monkeypatch.setenv("TRIAGE_RAG", value)
+    assert Triage._rag_enabled() is enabled
+
+
+def test_known_failure_catalog_is_well_formed():
+    ids = [c["id"] for c in Triage.KNOWN_FAILURES]
+    assert len(ids) == len(set(ids)) >= 8
+    assert all(c["title"].strip() and c["text"].strip() for c in Triage.KNOWN_FAILURES)
+
+
+def test_query_texts_pick_error_lines_including_camelcase_exceptions():
+    log = (
+        "2026 INFO all good\n"
+        "2026 INFO still fine\n"
+        "ValueError: could not convert string to float: 'N/A'\n"
+        "2026 ERROR load Task skipped\n"
+        "MemoryError: unable to allocate 14 GiB\n"
+    )
+    queries = Triage._rag_query_texts(log)
+
+    assert "ValueError: could not convert string to float: 'N/A'" in queries
+    assert "MemoryError: unable to allocate 14 GiB" in queries
+    assert not any("all good" in q for q in queries)
+
+
+def test_query_texts_dedupe_cap_and_truncate():
+    log = "\n".join(["ERROR same line"] * 5 + [f"ERROR distinct {i}" for i in range(20)])
+    queries = Triage._rag_query_texts(log)
+
+    assert queries.count("ERROR same line") == 1
+    assert len(queries) == Triage.RAG_MAX_QUERIES
+    long_line = Triage._rag_query_texts("ERROR " + "x" * 5000)[0]
+    assert len(long_line) == Triage.RAG_QUERY_LINE_CHARS
+
+
+def test_query_texts_fall_back_to_log_head_when_no_error_lines():
+    queries = Triage._rag_query_texts("job started\nrows read 10\nrows written 10\n")
+    assert queries == ["job started\nrows read 10\nrows written 10"]
+    assert Triage._rag_query_texts("   \n\n") == []
+
+
+def test_history_cases_read_dedupe_and_skip_bad_lines(monkeypatch, tmp_path):
+    history = tmp_path / "h.jsonl"
+    failure = {"failure_type": "S3 denied", "what_broke": "w", "evidence": "e", "next_step": "n"}
+    good = json.dumps({"timestamp": "T1", "triage": {"failures": [failure]}})
+    again = json.dumps({"timestamp": "T2", "triage": {"failures": [failure]}})  # same content
+    history.write_text("\n".join([good, "not json", '{"triage": {}}', again]) + "\n")
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(history))
+
+    cases = Triage._history_cases()
+
+    assert len(cases) == 1
+    assert cases[0]["title"] == "Past run: S3 denied"
+    assert cases[0]["source"] == "history"
+
+
+def test_history_cases_missing_file_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(tmp_path / "nope.jsonl"))
+    assert Triage._history_cases() == []
+
+
+def test_format_similar_cases_lists_nearest_first_with_similarity():
+    block = Triage._format_similar_cases(SIMILAR)
+
+    assert block.index("Out of memory") < block.index("S3 access denied")
+    assert "similarity 0.70" in block and "similarity 0.55" in block
+    assert "never cite them as evidence" in block
+    assert Triage._format_similar_cases([]) == ""
+
+
+def test_api_prompt_includes_retrieved_cases_before_the_log(monkeypatch):
+    monkeypatch.setenv("TRIAGE_RAG", "1")
+    monkeypatch.setattr(Triage, "_retrieve_similar", lambda queries: SIMILAR)
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    Triage.run_triage("x.log", "2024 ERROR boom")
+
+    content = client.calls[0]["messages"][0]["content"]
+    assert "Similar past cases" in content and "Out of memory in a transform" in content
+    assert content.index("Similar past cases") < content.index("2024 ERROR boom")
+
+
+def test_cli_prompt_includes_retrieved_cases(monkeypatch):
+    monkeypatch.setenv("TRIAGE_RAG", "1")
+    monkeypatch.setattr(Triage, "_retrieve_similar", lambda queries: SIMILAR)
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["prompt"] = cmd[2]  # claude -p <prompt> ...
+        return _completed(stdout=_cli_envelope(result=API_PAYLOAD))
+
+    monkeypatch.setattr(Triage.subprocess, "run", fake_run)
+
+    Triage.run_triage("x.log", "2024 ERROR boom")
+
+    assert "Similar past cases" in seen["prompt"]
+    assert "2024 ERROR boom" in seen["prompt"]
+
+
+def test_no_similar_block_when_rag_is_off(monkeypatch):
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    Triage.run_triage("x.log", "2024 ERROR boom")
+
+    assert "Similar past cases" not in client.calls[0]["messages"][0]["content"]
+
+
+def test_retrieval_failure_never_breaks_triage(monkeypatch, capsys):
+    monkeypatch.setenv("TRIAGE_RAG", "1")
+
+    def boom(queries):
+        raise RuntimeError("chroma exploded")
+
+    monkeypatch.setattr(Triage, "_retrieve_similar", boom)
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    triage = Triage.run_triage("x.log", "2024 ERROR boom")
+
+    assert triage.failures[0].failure_type == "S3 permission denied"
+    assert "vector search skipped (RuntimeError: chroma exploded)" in capsys.readouterr().err
+    assert "Similar past cases" not in client.calls[0]["messages"][0]["content"]
+
+
+def test_missing_rag_packages_skip_softly(monkeypatch, capsys):
+    """The Vercel case: TRIAGE_RAG set but chromadb not installed."""
+    monkeypatch.setenv("TRIAGE_RAG", "1")
+    monkeypatch.setitem(sys.modules, "chromadb", None)  # makes `import chromadb` fail
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    assert Triage.run_triage("x.log", "2024 ERROR boom").failures
+    assert "vector search skipped (ModuleNotFoundError" in capsys.readouterr().err
+
+
+def test_no_matches_note_and_no_block(monkeypatch, capsys):
+    monkeypatch.setenv("TRIAGE_RAG", "1")
+    monkeypatch.setattr(Triage, "_retrieve_similar", lambda queries: [])
+
+    assert Triage._similar_cases_for("ERROR x") == ""
+    assert "no sufficiently similar cases" in capsys.readouterr().err
+
+
+def test_image_triage_does_not_use_vector_search(monkeypatch):
+    monkeypatch.setenv("TRIAGE_RAG", "1")
+
+    def boom(*a, **k):
+        raise AssertionError("images have no text to embed")
+
+    monkeypatch.setattr(Triage, "_retrieve_similar", boom)
+    _use_api(monkeypatch, _FakeClient(response=_FakeResponse(API_PAYLOAD)))
+
+    assert Triage.run_triage_image("s.png", PNG_BYTES, "image/png").failures
+
+
+@pytest.mark.skipif(
+    not os.environ.get("RUN_RAG_INTEGRATION"),
+    reason="slow: loads the real embedding model; set RUN_RAG_INTEGRATION=1 to run",
+)
+def test_real_chroma_retrieval_finds_the_right_catalog_case(monkeypatch, tmp_path):
+    pytest.importorskip("chromadb")
+    pytest.importorskip("sentence_transformers")
+    monkeypatch.setattr(Triage, "RAG_DB_DIR", str(tmp_path / "vectors"))
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(tmp_path / "none.jsonl"))
+
+    similar = Triage._retrieve_similar(
+        ["ERROR AccessDenied when calling the GetObject operation: Access Denied for key x"]
+    )
+
+    assert similar[0]["title"].startswith("S3 / object storage permission denied")
+    assert len(similar) <= Triage.RAG_TOP_K
+    assert similar == sorted(similar, key=lambda c: c["distance"])

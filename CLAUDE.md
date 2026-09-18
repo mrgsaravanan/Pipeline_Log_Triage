@@ -30,6 +30,11 @@ sets `VERCEL` automatically). Local dev never needs the API path.
 Each successful run also appends a record to `.triage_history.jsonl`
 (local, gitignored, unbounded — see DESIGN.md's "Persistence" section).
 
+Optional local vector search: `pip install -r requirements-rag.txt`, then run
+with `TRIAGE_RAG=1` (see DESIGN.md). Local only - never add these packages to
+`requirements.txt` or `pyproject.toml`, which Vercel installs (PyTorch would
+break the build). The gated real-model test runs with `RUN_RAG_INTEGRATION=1`.
+
 ## Build / test gate
 
 ```bash

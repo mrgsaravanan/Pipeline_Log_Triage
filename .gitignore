@@ -42,3 +42,6 @@ __pycache__/
 
 # Local triage run history (see Triage.py HISTORY_FILE) - per-machine, not shared
 .triage_history.jsonl
+
+# Local vector-search index (TRIAGE_RAG=1) - per-machine, rebuilt on demand
+.triage_vectors/

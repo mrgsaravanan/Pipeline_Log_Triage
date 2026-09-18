@@ -1,0 +1,6 @@
+# Optional, LOCAL-ONLY extras for the vector-search step (TRIAGE_RAG=1).
+# Deliberately NOT in requirements.txt / pyproject.toml: sentence-transformers pulls in
+# PyTorch, which Vercel's build must never install. Install with:
+#   pip install -r requirements-rag.txt
+chromadb>=1.0.0
+sentence-transformers>=3.0.0

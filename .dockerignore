@@ -7,3 +7,4 @@ __pycache__/
 *.log
 .triage_history.jsonl
 .DS_Store
+.triage_vectors/

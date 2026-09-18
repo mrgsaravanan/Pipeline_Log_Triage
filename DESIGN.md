@@ -108,6 +108,49 @@ Not implemented: rate limiting (serverless instances are stateless, so an
 in-process limiter would be ineffective), and history persistence on Vercel
 (the filesystem is read-only; `_append_history` fails soft with a stderr note).
 
+## Local vector search ("RAG") - optional, local only
+
+`TRIAGE_RAG=1` adds a retrieval step before the model call. Nothing changes
+when it is unset, and it is **never installed on Vercel**: its dependencies
+(`chromadb`, `sentence-transformers` -> PyTorch) are in `requirements-rag.txt`,
+not `requirements.txt` / `pyproject.toml`, and every import is lazy.
+
+1. **Knowledge base.** `KNOWN_FAILURES` (12 categories: S3 permission, schema
+   drift, OOM, connection timeout, data-quality rejects, missing input,
+   expired credentials, disk full, Avro/schema mismatch, type conversion,
+   throttling, encoding) plus past triage results from the local history
+   file, de-duplicated by content, live in a local Chroma collection
+   (`.triage_vectors/`, gitignored, rebuilt on demand; only new or changed
+   cases are re-embedded).
+2. **Embedding.** `all-MiniLM-L6-v2` via `SentenceTransformerEmbeddingFunction`:
+   free, local, no API key. Cosine distance.
+3. **Query.** One short query per distinct error-ish line of the log (max 8,
+   300 chars each), searched separately and merged by best distance, so each
+   failure in a multi-failure log can pull in its own case. One embedding of
+   the whole log would be wrong here: the model reads only ~256 word-pieces,
+   so it would ignore everything after the opening lines. (The first version
+   did exactly that and missed one of two failures; the error-line filter
+   also had to match substrings so `ValueError` counts.)
+4. **Prompt.** The top 3 (`RAG_TOP_K`) go into the user message before the log,
+   labeled as background only, never as evidence. Both backends; not images.
+5. **Fail-soft.** Missing packages, a model-download failure, or a bad index
+   print a one-line stderr note and triage proceeds without context.
+
+Known limits, stated plainly:
+- **No clean similarity cutoff.** Right matches scored 0.44-0.68 and irrelevant
+  filler 0.35-0.42, so any threshold either drops real matches or lets noise
+  in. `RAG_MAX_DISTANCE` is loose; the prompt tells the model to ignore weak
+  matches, which it can only mostly do.
+- **Modest benefit on easy logs.** The sample logs are triaged correctly with
+  or without it; retrieval earns its keep on recurring, house-specific failures
+  whose past fixes are in the history/catalog.
+- **History self-match.** Re-triaging a log already in the history retrieves
+  its own earlier answer (similarity ~0.9), so the model sees its prior output
+  as "similar case". Fine for recurring incidents, misleading when testing.
+- **Cost:** the first run downloads a ~90 MB model, and each CLI run pays a few
+  seconds to load it (the web app would pay once per process).
+- **History is not de-noised:** a wrong past triage becomes a "known case".
+
 ## Screenshot ("image log") triage
 
 Uploading a PNG/JPEG/GIF/WebP screenshot of a log triages it with the same

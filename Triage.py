@@ -9,6 +9,7 @@ function can't hold an interactive `claude login` session.
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -49,6 +50,154 @@ HISTORY_FILE = ".triage_history.jsonl"
 MAX_LOG_CHARS = 200_000
 TRUNCATE_HEAD_CHARS = 120_000
 TRUNCATE_TAIL_CHARS = 60_000
+
+# --- Optional local vector search ("RAG") -----------------------------------
+# Off by default; enable with TRIAGE_RAG=1. Before triaging, embed the log's
+# error lines with a free local model and pull the most similar known failure
+# cases from a local Chroma collection into the prompt as reference. Runs only
+# on a developer machine: the dependencies (chromadb + sentence-transformers,
+# which pulls in PyTorch) live in requirements-rag.txt, NOT in requirements.txt
+# or pyproject.toml, so the Vercel build never installs them. Every import is
+# lazy and every failure is soft - retrieval can never break a triage.
+RAG_DB_DIR = ".triage_vectors"
+RAG_COLLECTION = "triage_cases"
+RAG_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+RAG_TOP_K = 3
+# Cosine distance (0 identical .. 2 opposite). Anything farther than this is
+# noise, not a similar case, and is dropped rather than shown to the model.
+RAG_MAX_DISTANCE = 0.85
+# all-MiniLM-L6-v2 only reads its first 256 word-pieces (~1,000 characters), so
+# one embedding of a whole log would ignore most of it. Instead each distinct
+# error line becomes its own short query and the results are merged, which also
+# lets every failure in a multi-failure log pull in its own similar case.
+RAG_QUERY_LINE_CHARS = 300
+RAG_MAX_QUERIES = 8
+
+# Known failure categories: a description plus the log phrasing each one
+# typically produces and the usual fix. Extend this list, or let the local
+# history file (past triage results) supplement it automatically.
+KNOWN_FAILURES = [
+    {
+        "id": "s3-access-denied",
+        "title": "S3 / object storage permission denied",
+        "text": (
+            "A task cannot read or write an object in cloud storage: AccessDenied, "
+            "403 Forbidden, botocore ClientError on GetObject or PutObject. Usually "
+            "an IAM role, bucket policy, or KMS key policy changed or lacks the "
+            "permission. Check the role attached to the run against the bucket and "
+            "key prefix."
+        ),
+    },
+    {
+        "id": "schema-drift-missing-column",
+        "title": "Upstream schema drift (missing or renamed column)",
+        "text": (
+            "A transform fails with KeyError, column not found, or invalid column "
+            "name because an upstream table or file dropped, renamed, or retyped a "
+            "column. Compare the current upstream schema with what the task "
+            "expects; restore or remap the column, then re-run."
+        ),
+    },
+    {
+        "id": "out-of-memory",
+        "title": "Out of memory in a transform",
+        "text": (
+            "MemoryError, OutOfMemoryError, or unable to allocate N GiB for an "
+            "array. A join, cross product, or full-data load is far larger than "
+            "the worker memory. Chunk or stream the processing, fix the exploding "
+            "join, or raise the memory limit."
+        ),
+    },
+    {
+        "id": "connection-timeout",
+        "title": "Database or service connection timeout",
+        "text": (
+            "Connection refused, connection timed out, could not connect to server, "
+            "or network unreachable while opening a source or sink. The database "
+            "or service is down, overloaded, blocked by a firewall or VNet rule, or "
+            "the host name changed. Check reachability from the runtime."
+        ),
+    },
+    {
+        "id": "data-quality-rejects",
+        "title": "Data quality: rows rejected for invalid values",
+        "text": (
+            "A stage logs N rows rejected, invalid value for column, or failed "
+            "validation, while the job still finishes. Malformed emails, dates, or "
+            "nulls in the source. Inspect the reject output and decide whether to "
+            "fix the source or add a cleansing rule."
+        ),
+    },
+    {
+        "id": "missing-input-file",
+        "title": "Expected input file or partition missing",
+        "text": (
+            "File not found, no such key, path does not exist, or zero rows for the "
+            "run date. The upstream job has not delivered its output yet or wrote "
+            "to a different path. Check the producer's schedule and output "
+            "location; add a wait or dependency."
+        ),
+    },
+    {
+        "id": "credential-expired",
+        "title": "Expired or invalid credentials",
+        "text": (
+            "401 Unauthorized, authentication failed, token expired, invalid client "
+            "secret, or login failed for user. A service principal secret, password, "
+            "or access token expired or was rotated. Renew the credential in the "
+            "secret store and confirm the pipeline reads the new version."
+        ),
+    },
+    {
+        "id": "disk-full",
+        "title": "Disk or storage full",
+        "text": (
+            "No space left on device, disk quota exceeded, or failed to write "
+            "temporary or spill files. The worker's local disk or a staging area "
+            "filled up. Clean old temp files, enlarge the volume, or reduce spill."
+        ),
+    },
+    {
+        "id": "serialization-schema-mismatch",
+        "title": "Serialization / schema registry mismatch (Avro, Protobuf)",
+        "text": (
+            "SchemaResolutionError, deserialization failed, or reader schema is "
+            "missing a field from the writer schema on a stream or topic. Producer "
+            "and consumer schema versions diverged. Update the consumer schema to "
+            "the producer's version, then resume from the failed offset."
+        ),
+    },
+    {
+        "id": "type-conversion",
+        "title": "Type conversion error on bad numeric data",
+        "text": (
+            "ValueError: could not convert string to float, invalid literal for "
+            "int, or cast failure, often from a placeholder such as N/A, empty "
+            "string, or NULL in a numeric column. Clean or coerce the values "
+            "upstream, or handle them explicitly before the calculation."
+        ),
+    },
+    {
+        "id": "throttling",
+        "title": "API throttling / rate limit exceeded",
+        "text": (
+            "429 Too Many Requests, rate limit exceeded, throttled, or request "
+            "quota exhausted from a source API or storage account. Too many "
+            "parallel copies or requests. Lower concurrency, add retry with "
+            "backoff, or raise the quota."
+        ),
+    },
+    {
+        "id": "encoding-error",
+        "title": "Character encoding mismatch",
+        "text": (
+            "UnicodeDecodeError, invalid byte sequence, or garbled characters when "
+            "reading a file. The source is in a legacy encoding such as "
+            "Windows-1252 or Latin-1 but is read as UTF-8. Declare the correct "
+            "encoding or have the producer re-export as UTF-8."
+        ),
+    },
+]
 
 SYSTEM_PROMPT = """You are a data pipeline on-call engineer triaging a failed run.
 
@@ -184,8 +333,9 @@ def _strip_code_fence(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _log_message(log_path: str, log_text: str) -> str:
-    return f"Pipeline log from `{log_path}`:\n\n<log>\n{log_text}\n</log>"
+def _log_message(log_path: str, log_text: str, similar_context: str = "") -> str:
+    prefix = f"{similar_context}\n\n" if similar_context else ""
+    return f"{prefix}Pipeline log from `{log_path}`:\n\n<log>\n{log_text}\n</log>"
 
 
 def _parse_triage_text(text: str) -> Triage:
@@ -209,6 +359,156 @@ def _triage_backend() -> str:
     return "api" if os.environ.get("VERCEL") else "cli"
 
 
+def _rag_enabled() -> bool:
+    return os.environ.get("TRIAGE_RAG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+# Substring matches on purpose: "ValueError" and "MemoryError" must count, which
+# a \berror\b word-boundary match would miss.
+_SIGNAL_LINE = re.compile(
+    r"error|exception|fatal|critical|traceback|fail|denied|refused|timeout|timed out|"
+    r"rejected|invalid|unable|cannot|could not|missing|not found|no space",
+    re.IGNORECASE,
+)
+
+
+def _rag_query_texts(log_text: str) -> list[str]:
+    """One short query per distinct error-ish line (capped), else the log's head.
+
+    Falls back to the first lines when nothing looks like an error, so a quiet
+    log still gets a (weaker) query rather than none.
+    """
+    lines = [ln.strip() for ln in log_text.splitlines() if ln.strip()]
+    signal = list(dict.fromkeys(ln for ln in lines if _SIGNAL_LINE.search(ln)))
+    if not signal:
+        return ["\n".join(lines[:5])[:RAG_QUERY_LINE_CHARS]] if lines else []
+    return [ln[:RAG_QUERY_LINE_CHARS] for ln in signal[:RAG_MAX_QUERIES]]
+
+
+def _history_cases() -> list[dict]:
+    """Past triage results from the local history file, as extra searchable cases.
+
+    De-duplicated by content (re-running the same log would otherwise fill the
+    top-3 with copies of itself); malformed lines are skipped, a missing file
+    is simply no history.
+    """
+    cases: dict[str, dict] = {}
+    try:
+        with open(HISTORY_FILE, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+
+    for line in lines:
+        try:
+            record = json.loads(line)
+            failures = record["triage"]["failures"]
+            stamp = record["timestamp"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        for i, failure in enumerate(failures):
+            try:
+                title = f"Past run: {failure['failure_type']}"
+                text = (
+                    f"{failure['what_broke']} Evidence: {failure['evidence']} "
+                    f"Next step: {failure['next_step']}"
+                )
+            except (KeyError, TypeError):
+                continue
+            cases[text] = {"id": f"hist-{stamp}-{i}", "title": title, "text": text[:800],
+                           "source": "history"}
+    return list(cases.values())
+
+
+def _retrieve_similar(queries: list[str]) -> list[dict]:
+    """Top-k most similar known cases from a local Chroma collection.
+
+    Each query is searched separately; a case's score is its best (smallest)
+    distance across queries. Returns dicts with title/text/source/distance,
+    nearest first, dropping anything beyond RAG_MAX_DISTANCE. Raises on any
+    failure (missing packages, model download, disk); callers go through
+    _similar_cases_for, which turns that into a soft skip.
+    """
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    import chromadb
+    from chromadb.utils import embedding_functions
+
+    client = chromadb.PersistentClient(
+        path=RAG_DB_DIR, settings=chromadb.Settings(anonymized_telemetry=False)
+    )
+    collection = client.get_or_create_collection(
+        name=RAG_COLLECTION,
+        embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=RAG_EMBEDDING_MODEL
+        ),
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    cases = [{**c, "source": "catalog"} for c in KNOWN_FAILURES] + _history_cases()
+    existing = collection.get(ids=[c["id"] for c in cases])
+    have = dict(zip(existing["ids"], existing["documents"]))
+    fresh = [c for c in cases if have.get(c["id"]) != f"{c['title']}. {c['text']}"]
+    if fresh:  # embed only what is new or changed; the model load dominates anyway
+        collection.upsert(
+            ids=[c["id"] for c in fresh],
+            documents=[f"{c['title']}. {c['text']}" for c in fresh],
+            metadatas=[{"title": c["title"], "source": c["source"]} for c in fresh],
+        )
+
+    if not queries:
+        return []
+    result = collection.query(
+        query_texts=queries, n_results=min(RAG_TOP_K, collection.count())
+    )
+    best: dict[str, dict] = {}
+    for docs, metas, distances, ids in zip(
+        result["documents"], result["metadatas"], result["distances"], result["ids"]
+    ):
+        for doc, meta, distance, case_id in zip(docs, metas, distances, ids):
+            if distance <= RAG_MAX_DISTANCE and (
+                case_id not in best or distance < best[case_id]["distance"]
+            ):
+                best[case_id] = {"title": meta["title"], "text": doc,
+                                 "source": meta["source"], "distance": distance}
+    return sorted(best.values(), key=lambda c: c["distance"])[:RAG_TOP_K]
+
+
+def _format_similar_cases(similar: list[dict]) -> str:
+    """The prompt block that hands the retrieved cases to the model."""
+    if not similar:
+        return ""
+    entries = "\n".join(
+        f"{i}. {c['title']} (similarity {1 - c['distance']:.2f})\n   {c['text']}"
+        for i, c in enumerate(similar, start=1)
+    )
+    return (
+        "Similar past cases from the knowledge base (found by vector search, most "
+        "similar first). Use them only as background on likely causes and fixes, and "
+        "only where they genuinely match this log. Do not force a match, and never "
+        "cite them as evidence - evidence must come from the log below.\n\n"
+        f"{entries}"
+    )
+
+
+def _similar_cases_for(log_text: str) -> str:
+    """Prompt context for this log, or "" if RAG is off or anything goes wrong."""
+    if not _rag_enabled():
+        return ""
+    try:
+        similar = _retrieve_similar(_rag_query_texts(log_text))
+    except Exception as e:  # noqa: BLE001 - retrieval is best-effort by design
+        print(f"note: vector search skipped ({type(e).__name__}: {e})", file=sys.stderr)
+        return ""
+
+    if similar:
+        matched = ", ".join(f"{c['title']} ({1 - c['distance']:.2f})" for c in similar)
+        print(f"note: vector search matched: {matched}", file=sys.stderr)
+    else:
+        print("note: vector search found no sufficiently similar cases", file=sys.stderr)
+    return _format_similar_cases(similar)
+
+
 def detect_image_media_type(data: bytes) -> str | None:
     """Identify PNG/JPEG/GIF/WebP by magic bytes (filenames and client-supplied
     content types can lie; the bytes can't). None means "not a supported image"."""
@@ -226,11 +526,12 @@ def detect_image_media_type(data: bytes) -> str | None:
 def run_triage(log_path: str, log_text: str) -> Triage:
     """Triage a text log via whichever backend this environment uses."""
     backend = _triage_backend()
+    if backend not in ("api", "cli"):
+        raise ClaudeCliError(f"unknown TRIAGE_BACKEND {backend!r} (expected 'cli' or 'api')")
+    similar_context = _similar_cases_for(log_text)
     if backend == "api":
-        return run_triage_via_api(log_path, log_text)
-    if backend == "cli":
-        return run_triage_via_claude_cli(log_path, log_text)
-    raise ClaudeCliError(f"unknown TRIAGE_BACKEND {backend!r} (expected 'cli' or 'api')")
+        return run_triage_via_api(log_path, log_text, similar_context)
+    return run_triage_via_claude_cli(log_path, log_text, similar_context)
 
 
 def run_triage_image(image_name: str, image_bytes: bytes, media_type: str) -> Triage:
@@ -284,12 +585,12 @@ def _call_api(user_content) -> Triage:
     return _parse_triage_text(text)
 
 
-def run_triage_via_api(log_path: str, log_text: str) -> Triage:
+def run_triage_via_api(log_path: str, log_text: str, similar_context: str = "") -> Triage:
     """Ask Claude via the Anthropic API (billed ANTHROPIC_API_KEY) - for hosted use.
 
     Same prompt as the CLI path; only the transport differs.
     """
-    return _call_api(_log_message(log_path, log_text))
+    return _call_api(_log_message(log_path, log_text, similar_context))
 
 
 def run_triage_via_api_image(image_name: str, image_bytes: bytes, media_type: str) -> Triage:
@@ -308,11 +609,13 @@ def run_triage_via_api_image(image_name: str, image_bytes: bytes, media_type: st
     return _call_api(content)
 
 
-def run_triage_via_claude_cli(log_path: str, log_text: str) -> Triage:
+def run_triage_via_claude_cli(
+    log_path: str, log_text: str, similar_context: str = ""
+) -> Triage:
     """Ask the claude CLI to triage a log, routed through the user's subscription."""
     prompt = (
         f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}\n\n"
-        f"{_log_message(log_path, log_text)}"
+        f"{_log_message(log_path, log_text, similar_context)}"
     )
 
     result = subprocess.run(
