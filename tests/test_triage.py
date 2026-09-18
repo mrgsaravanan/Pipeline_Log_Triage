@@ -5,6 +5,7 @@ monkeypatched everywhere it would be called, so the suite runs offline,
 deterministically, and for free.
 """
 
+import base64
 import json
 import subprocess
 import sys
@@ -575,3 +576,183 @@ def test_web_access_code_enforced_when_set(monkeypatch):
     assert web._access_ok("wrong") is False
     assert web._access_ok("") is False
     assert 'name="access_code"' in web._form_html()
+
+
+# --- image (screenshot) logs ----------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"not-a-real-image-but-has-the-magic-bytes"
+
+
+@pytest.mark.parametrize(
+    "data, expected",
+    [
+        (b"\x89PNG\r\n\x1a\nrest", "image/png"),
+        (b"\xff\xd8\xff\xe0rest", "image/jpeg"),
+        (b"GIF89arest", "image/gif"),
+        (b"GIF87arest", "image/gif"),
+        (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "image/webp"),
+        (b"RIFF\x00\x00\x00\x00WAVEfmt ", None),  # RIFF but not WebP
+        (b"2024-01-01 ERROR plain text log", None),
+        (b"%PDF-1.7 ...", None),
+        (b"", None),
+        (b"\x89PN", None),  # truncated header
+    ],
+)
+def test_detect_image_media_type(data, expected):
+    assert Triage.detect_image_media_type(data) == expected
+
+
+def test_api_image_request_carries_image_block_and_triage_prompt(monkeypatch):
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    triage = Triage.run_triage_image("shot.png", PNG_BYTES, "image/png")
+
+    assert triage.failures[0].failure_type == "S3 permission denied"
+    call = client.calls[0]
+    assert Triage.SYSTEM_PROMPT in call["system"]
+    image_block, text_block = call["messages"][0]["content"]
+    assert image_block["type"] == "image"
+    assert image_block["source"]["type"] == "base64"
+    assert image_block["source"]["media_type"] == "image/png"
+    assert base64.b64decode(image_block["source"]["data"]) == PNG_BYTES
+    assert text_block["type"] == "text"
+    assert "shot.png" in text_block["text"]
+    assert "cut off" in text_block["text"]  # the don't-guess-unreadable-text instruction
+
+
+def test_image_triage_refuses_cli_backend_with_clear_message():
+    # autouse fixture leaves the default (cli) backend in place
+    with pytest.raises(Triage.ClaudeCliError, match="image logs need the API backend"):
+        Triage.run_triage_image("shot.png", PNG_BYTES, "image/png")
+
+
+def test_image_triage_shares_api_error_handling(monkeypatch):
+    monkeypatch.setenv("TRIAGE_BACKEND", "api")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    with pytest.raises(Triage.ClaudeApiError, match="ANTHROPIC_API_KEY is not set"):
+        Triage.run_triage_image("shot.png", PNG_BYTES, "image/png")
+
+
+def test_main_triages_image_file_on_api_backend(monkeypatch, capsys, tmp_path):
+    image_file = tmp_path / "failure.png"
+    image_file.write_bytes(PNG_BYTES)
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(image_file)])
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    assert main() == 0
+    assert "S3 permission denied" in capsys.readouterr().out
+    assert client.calls[0]["messages"][0]["content"][0]["type"] == "image"
+
+
+def test_main_image_on_cli_backend_fails_cleanly(monkeypatch, capsys, tmp_path):
+    image_file = tmp_path / "failure.png"
+    image_file.write_bytes(PNG_BYTES)
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(image_file)])
+
+    assert main() == 1
+    assert "image logs need the API backend" in capsys.readouterr().err
+
+
+def test_main_rejects_oversized_image(monkeypatch, capsys, tmp_path):
+    image_file = tmp_path / "huge.png"
+    image_file.write_bytes(PNG_BYTES + b"x" * Triage.MAX_IMAGE_BYTES)
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(image_file)])
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    assert main() == 1
+    assert "larger than" in capsys.readouterr().err
+    assert client.calls == []  # rejected before any (billed) API call
+
+
+def test_text_log_still_uses_text_path_not_image_path(monkeypatch, capsys, tmp_path):
+    _write_log(tmp_path, monkeypatch)
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    assert main() == 0
+    assert isinstance(client.calls[0]["messages"][0]["content"], str)
+
+
+# --- web app: uploads -----------------------------------------------------------
+
+
+def _upload(name: str, data: bytes):
+    import io
+
+    from starlette.datastructures import UploadFile
+
+    return UploadFile(file=io.BytesIO(data), filename=name)
+
+
+def _post_triage(**kwargs):
+    import asyncio
+
+    from azure_app import main as web
+
+    return asyncio.run(web.triage(**kwargs))
+
+
+def test_web_image_upload_is_triaged_via_api(monkeypatch):
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    html = _post_triage(log_text="", log_file=_upload("shot.png", PNG_BYTES), access_code="")
+
+    assert "S3 permission denied" in html
+    assert client.calls[0]["messages"][0]["content"][0]["type"] == "image"
+
+
+def test_web_image_on_cli_backend_shows_clean_error(monkeypatch):
+    html = _post_triage(log_text="", log_file=_upload("shot.png", PNG_BYTES), access_code="")
+
+    assert "Triage failed: image logs need the API backend" in html
+
+
+def test_web_rejects_oversized_image_before_calling_api(monkeypatch):
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+    big = PNG_BYTES + b"x" * Triage.MAX_IMAGE_BYTES
+
+    html = _post_triage(log_text="", log_file=_upload("big.png", big), access_code="")
+
+    assert "Image is larger than" in html
+    assert client.calls == []
+
+
+def test_web_rejects_non_image_binary_file(monkeypatch):
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    html = _post_triage(
+        log_text="", log_file=_upload("report.pdf", b"%PDF-1.7\x00\x01\x02binary"), access_code=""
+    )
+
+    assert "looks like a binary file" in html
+    assert client.calls == []
+
+
+def test_web_text_upload_still_works(monkeypatch):
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    html = _post_triage(
+        log_text="", log_file=_upload("app.log", b"2024 ERROR boom\n"), access_code=""
+    )
+
+    assert "S3 permission denied" in html
+    assert isinstance(client.calls[0]["messages"][0]["content"], str)
+
+
+def test_web_image_upload_still_respects_access_code(monkeypatch):
+    monkeypatch.setenv("TRIAGE_ACCESS_CODE", "s3cret")
+    client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
+    _use_api(monkeypatch, client)
+
+    html = _post_triage(log_text="", log_file=_upload("shot.png", PNG_BYTES), access_code="nope")
+
+    assert "Incorrect access code" in html
+    assert client.calls == []

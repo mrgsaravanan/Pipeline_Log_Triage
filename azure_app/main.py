@@ -23,10 +23,13 @@ from fastapi.responses import HTMLResponse
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from Triage import (
+    MAX_IMAGE_BYTES,
     ClaudeCliError,
     _append_history,
     _truncate_log_text,
+    detect_image_media_type,
     run_triage,
+    run_triage_image,
 )
 
 app = FastAPI(title="Pipeline Log Triage")
@@ -56,7 +59,7 @@ FORM_TEMPLATE = """
 <form method="post" action="/triage" enctype="multipart/form-data">
   <label>Paste log text</label>
   <textarea name="log_text" placeholder="Paste a pipeline log here..."></textarea>
-  <label>...or upload a log file</label>
+  <label>...or upload a log file, or a screenshot of one (PNG, JPEG, GIF, WebP)</label>
   <input type="file" name="log_file">{access_code_field}
   <br><button type="submit">Triage it</button>
 </form>
@@ -126,30 +129,51 @@ async def triage(
         body = _form_html() + '<p class="error">Incorrect access code.</p>'
         return PAGE_HEAD + body + PAGE_TAIL
 
+    image: tuple[str, bytes] | None = None
     if log_file is not None and log_file.filename:
         raw = await log_file.read()
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            text = raw.decode("latin-1")
         source_name = log_file.filename
+        media_type = detect_image_media_type(raw)
+        if media_type is not None:
+            if len(raw) > MAX_IMAGE_BYTES:
+                error = f"Image is larger than {MAX_IMAGE_BYTES / 1e6:.1f} MB; please shrink it."
+                return PAGE_HEAD + _form_html() + f'<p class="error">{error}</p>' + PAGE_TAIL
+            image = (media_type, raw)
+            text = ""
+        elif b"\x00" in raw[:8192]:
+            # Not text and not a supported image (PDF, zip, UTF-16 text, ...):
+            # decoding it would only send gibberish to the model.
+            error = (
+                "That looks like a binary file. Upload a text log, or a screenshot "
+                "(PNG, JPEG, GIF, WebP)."
+            )
+            return PAGE_HEAD + _form_html() + f'<p class="error">{error}</p>' + PAGE_TAIL
+        else:
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("latin-1")
     else:
         text = log_text
         source_name = "(pasted text)"
 
-    if not text.strip():
+    if image is None and not text.strip():
         body = _form_html() + '<p class="error">No log content provided.</p>'
         return PAGE_HEAD + body + PAGE_TAIL
 
-    text, was_truncated = _truncate_log_text(text)
-    truncation_note = (
-        '<p><em>Note: input was large and was truncated to a head+tail excerpt.</em></p>'
-        if was_truncated
-        else ""
-    )
+    truncation_note = ""
+    if image is None:
+        text, was_truncated = _truncate_log_text(text)
+        if was_truncated:
+            truncation_note = (
+                "<p><em>Note: input was large and was truncated to a head+tail excerpt.</em></p>"
+            )
 
     try:
-        result = run_triage(source_name, text)
+        if image is not None:
+            result = run_triage_image(source_name, image[1], image[0])
+        else:
+            result = run_triage(source_name, text)
     except FileNotFoundError:
         error = "claude CLI not found in this container - check the Docker image build."
     except subprocess.TimeoutExpired:

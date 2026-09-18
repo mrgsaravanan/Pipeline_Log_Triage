@@ -6,6 +6,7 @@ or TRIAGE_BACKEND=api) it calls the Anthropic API instead, since a serverless
 function can't hold an interactive `claude login` session.
 """
 
+import base64
 import json
 import os
 import subprocess
@@ -24,6 +25,11 @@ CLI_TIMEOUT_SECONDS = 180
 # reply mid-JSON (see DESIGN.md history), and we only pay for tokens generated.
 API_TIMEOUT_SECONDS = 50.0
 API_MAX_TOKENS = 8192
+
+# Screenshot ("image log") support, hosted/API backend only. The cap sits under
+# Vercel's ~4.5 MB request-body limit (and the API's 5 MB per-image limit) so an
+# oversized image gets our clear message instead of a platform error.
+MAX_IMAGE_BYTES = 4_000_000
 
 # The only thing that persists between separate runs of this script. Every
 # other piece of state - the raw log text, the built prompt, the claude CLI
@@ -85,6 +91,15 @@ code fences, no commentary before or after it - matching exactly this shape:
 }"""
 
 
+IMAGE_LOG_INSTRUCTIONS = (
+    "The pipeline log is in the attached screenshot. Read the text in it "
+    "carefully and triage it as instructed. Quote evidence only from text you "
+    "can actually read - if a line is blurry, cut off, or ambiguous, say so in "
+    "`notes` rather than guessing. If the image does not contain a pipeline "
+    "log, return an empty failures list and say what it shows in `notes`."
+)
+
+
 class Failure(BaseModel):
     failure_type: str
     what_broke: str
@@ -123,6 +138,24 @@ def _read_log_file(log_path: str) -> tuple[str, bool]:
     except UnicodeDecodeError:
         with open(log_path, encoding="latin-1") as f:
             return f.read(), True
+
+
+def _load_image(log_path: str) -> tuple[str, bytes] | None:
+    """(media_type, bytes) if the file is a supported image, else None.
+
+    Reads at most MAX_IMAGE_BYTES + 1 bytes so an enormous file can't be pulled
+    into memory just to be rejected. An unreadable file also returns None; the
+    text path that follows reports the OSError with its usual message.
+    """
+    try:
+        with open(log_path, "rb") as f:
+            header = f.read(16)
+            media_type = detect_image_media_type(header)
+            if media_type is None:
+                return None
+            return media_type, header + f.read(MAX_IMAGE_BYTES + 1)
+    except OSError:
+        return None
 
 
 def _truncate_log_text(log_text: str) -> tuple[str, bool]:
@@ -176,8 +209,22 @@ def _triage_backend() -> str:
     return "api" if os.environ.get("VERCEL") else "cli"
 
 
+def detect_image_media_type(data: bytes) -> str | None:
+    """Identify PNG/JPEG/GIF/WebP by magic bytes (filenames and client-supplied
+    content types can lie; the bytes can't). None means "not a supported image"."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
 def run_triage(log_path: str, log_text: str) -> Triage:
-    """Triage a log via whichever backend this environment uses."""
+    """Triage a text log via whichever backend this environment uses."""
     backend = _triage_backend()
     if backend == "api":
         return run_triage_via_api(log_path, log_text)
@@ -186,11 +233,26 @@ def run_triage(log_path: str, log_text: str) -> Triage:
     raise ClaudeCliError(f"unknown TRIAGE_BACKEND {backend!r} (expected 'cli' or 'api')")
 
 
-def run_triage_via_api(log_path: str, log_text: str) -> Triage:
-    """Ask Claude via the Anthropic API (billed ANTHROPIC_API_KEY) - for hosted use.
+def run_triage_image(image_name: str, image_bytes: bytes, media_type: str) -> Triage:
+    """Triage a screenshot of a log. Needs the API backend: the local `claude -p`
+    path has no clean way to pass an image, so it fails with a clear message."""
+    backend = _triage_backend()
+    if backend == "api":
+        return run_triage_via_api_image(image_name, image_bytes, media_type)
+    if backend == "cli":
+        raise ClaudeCliError(
+            "image logs need the API backend (set TRIAGE_BACKEND=api and "
+            "ANTHROPIC_API_KEY); the local claude CLI path only handles text logs"
+        )
+    raise ClaudeCliError(f"unknown TRIAGE_BACKEND {backend!r} (expected 'cli' or 'api')")
 
-    Same prompt as the CLI path; only the transport differs. `anthropic` is
-    imported lazily so CLI-only local use never needs it at import time.
+
+def _call_api(user_content) -> Triage:
+    """Send one user turn to the Anthropic API and parse the JSON reply.
+
+    Shared by the text and image paths so both get identical error mapping,
+    truncation detection, and schema validation. `anthropic` is imported lazily
+    so CLI-only local use never needs it at import time.
     """
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise ClaudeApiError("ANTHROPIC_API_KEY is not set in this environment")
@@ -203,7 +265,7 @@ def run_triage_via_api(log_path: str, log_text: str) -> Triage:
             model=MODEL,
             max_tokens=API_MAX_TOKENS,
             system=f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}",
-            messages=[{"role": "user", "content": _log_message(log_path, log_text)}],
+            messages=[{"role": "user", "content": user_content}],
         )
     except anthropic.AuthenticationError as e:
         raise ClaudeApiError("Anthropic API rejected the API key (check ANTHROPIC_API_KEY)") from e
@@ -220,6 +282,30 @@ def run_triage_via_api(log_path: str, log_text: str) -> Triage:
     if not text.strip():
         raise ClaudeApiError("Anthropic API returned no text")
     return _parse_triage_text(text)
+
+
+def run_triage_via_api(log_path: str, log_text: str) -> Triage:
+    """Ask Claude via the Anthropic API (billed ANTHROPIC_API_KEY) - for hosted use.
+
+    Same prompt as the CLI path; only the transport differs.
+    """
+    return _call_api(_log_message(log_path, log_text))
+
+
+def run_triage_via_api_image(image_name: str, image_bytes: bytes, media_type: str) -> Triage:
+    """Triage a screenshot of a log: the image plus the same triage prompt."""
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.standard_b64encode(image_bytes).decode("ascii"),
+            },
+        },
+        {"type": "text", "text": f"Screenshot `{image_name}`. {IMAGE_LOG_INSTRUCTIONS}"},
+    ]
+    return _call_api(content)
 
 
 def run_triage_via_claude_cli(log_path: str, log_text: str) -> Triage:
@@ -302,33 +388,50 @@ def main() -> int:
         return 1
 
     log_path = sys.argv[1]
+    image = _load_image(log_path)
+    if image is not None:
+        media_type, image_bytes = image
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            print(
+                f"{log_path} is larger than {MAX_IMAGE_BYTES / 1e6:.1f} MB; "
+                "screenshots above that size are not supported.",
+                file=sys.stderr,
+            )
+            return 1
+
+        def job() -> Triage:
+            return run_triage_image(log_path, image_bytes, media_type)
+    else:
+        try:
+            log_text, used_fallback_encoding = _read_log_file(log_path)
+        except OSError as e:
+            print(f"could not read {log_path}: {e}", file=sys.stderr)
+            return 1
+
+        if used_fallback_encoding:
+            print(
+                f"note: {log_path} is not valid UTF-8; decoded as Latin-1 instead. "
+                "Some characters may be misrendered.",
+                file=sys.stderr,
+            )
+
+        if not log_text.strip():
+            print(f"{log_path} is empty - nothing to triage.", file=sys.stderr)
+            return 1
+
+        log_text, was_truncated = _truncate_log_text(log_text)
+        if was_truncated:
+            print(
+                f"note: {log_path} is large; sending a truncated head+tail "
+                "excerpt to the model instead of the full file.",
+                file=sys.stderr,
+            )
+
+        def job() -> Triage:
+            return run_triage(log_path, log_text)
+
     try:
-        log_text, used_fallback_encoding = _read_log_file(log_path)
-    except OSError as e:
-        print(f"could not read {log_path}: {e}", file=sys.stderr)
-        return 1
-
-    if used_fallback_encoding:
-        print(
-            f"note: {log_path} is not valid UTF-8; decoded as Latin-1 instead. "
-            "Some characters may be misrendered.",
-            file=sys.stderr,
-        )
-
-    if not log_text.strip():
-        print(f"{log_path} is empty - nothing to triage.", file=sys.stderr)
-        return 1
-
-    log_text, was_truncated = _truncate_log_text(log_text)
-    if was_truncated:
-        print(
-            f"note: {log_path} is large; sending a truncated head+tail "
-            "excerpt to the model instead of the full file.",
-            file=sys.stderr,
-        )
-
-    try:
-        triage = run_triage(log_path, log_text)
+        triage = job()
     except FileNotFoundError:
         print(
             "claude CLI not found - install Claude Code and run `claude login`.",

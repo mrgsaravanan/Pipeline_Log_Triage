@@ -36,5 +36,8 @@ truncation cap) is about $0.05. The Vercel Hobby tier itself is free.
 - Vercel request bodies are capped at ~4.5 MB; larger uploads are rejected
   by the platform before reaching the app.
 - History (`.triage_history.jsonl`) is not persisted on Vercel.
+- Screenshots (PNG/JPEG/GIF/WebP, up to 4 MB) are supported on Vercel via the
+  API backend. Each image costs a little more than text (roughly a cent or
+  less on Haiku). Accuracy depends on how legible the screenshot is.
 - Not yet verified on a real Vercel deployment - the first deploy may need
   tweaks (see the checklist above and report any build error).

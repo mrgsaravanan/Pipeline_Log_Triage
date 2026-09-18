@@ -108,6 +108,36 @@ Not implemented: rate limiting (serverless instances are stateless, so an
 in-process limiter would be ineffective), and history persistence on Vercel
 (the filesystem is read-only; `_append_history` fails soft with a stderr note).
 
+## Screenshot ("image log") triage
+
+Uploading a PNG/JPEG/GIF/WebP screenshot of a log triages it with the same
+prompt, using the model's vision. **API backend only**: the local
+`claude -p` path has no clean way to pass an image, so it fails with a clear
+message (`run_triage_image`). Locally, `TRIAGE_BACKEND=api python Triage.py
+shot.png` works too.
+
+- Images are recognized by **magic bytes** (`detect_image_media_type`), not
+  filename or client-supplied content type, which can lie.
+- The request is an image block plus a text block that tells the model to
+  quote only text it can actually read, flag blurry/cut-off lines in `notes`,
+  and return an empty `failures` list if the image isn't a log (verified: a
+  plain blue square yields no invented failures).
+- `MAX_IMAGE_BYTES` (4 MB) sits under Vercel's ~4.5 MB body limit and the
+  API's 5 MB image limit; oversized images are rejected before any billed call.
+- Text and image requests share `_call_api`, so error mapping, truncation
+  detection, and schema validation are identical.
+- The web app now also rejects non-text, non-image binary uploads (PDF, zip,
+  and UTF-16 text, which contains NUL bytes) with a clear message instead of
+  decoding them into gibberish. This also turns the UTF-16 gap below into an
+  explicit error *for the web app*; the CLI path is unchanged.
+
+Known limits: screenshot triage is a good first pass, not a transcript.
+Small, blurry, or partly cropped text can be misread or elided (a live test
+showed the model abbreviating one long evidence line with "..."), so verify
+quoted evidence against the source before acting on it. Text inside an image
+can also try to steer the model (prompt injection); the worst case is a
+skewed report, since output is HTML-escaped and no tools are available to it.
+
 ## Log varieties
 
 The script treats the log as opaque text and lets the model do all the
