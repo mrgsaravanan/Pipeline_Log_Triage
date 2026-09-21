@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Triage Workflow</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; --accent:#1a5fd0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; --accent:#6ea8ff; }
+  }
+  body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         max-width:1100px; margin:2rem auto; padding:0 1rem; }
+  input, select, textarea { background:var(--card); color:var(--fg); border:1px solid var(--line);
+         border-radius:4px; padding:.4rem; font:inherit; box-sizing:border-box; }
+  textarea { width:100%; }
+  button { padding:.4rem 1rem; cursor:pointer; font:inherit; }
+  label { display:block; font-weight:600; margin:.6rem 0 .2rem; font-size:.85rem; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  .error { color:var(--err); white-space:pre-wrap; }
+  header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem; }
+  .login { max-width:320px; margin:4rem auto; }
+  .login input { width:100%; }
+  .stats { display:flex; gap:1rem; flex-wrap:wrap; margin:1rem 0; }
+  .stat { background:var(--card); padding:.6rem 1rem; border-radius:6px; min-width:110px; }
+  .stat b { display:block; font-size:1.3rem; }
+  .filters { display:flex; gap:.75rem; flex-wrap:wrap; align-items:center; margin:.5rem 0 1rem; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; }
+  th, td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--line); }
+  tbody tr { cursor:pointer; }
+  tbody tr:hover, tbody tr.sel { background:var(--card); }
+  .pill { padding:.1rem .5rem; border-radius:10px; background:var(--card); border:1px solid var(--line); font-size:.8rem; }
+  .P0, .P1 { color:var(--err); border-color:var(--err); }
+  .detail { background:var(--card); border-radius:6px; padding:1rem; margin-top:1.5rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:0 1rem; }
+  .grid select, .grid input { width:100%; }
+  pre { white-space:pre-wrap; margin:.2rem 0; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+
+<section id="loginView" class="login" hidden>
+  <h1>Triage Workflow</h1>
+  <label for="user">Username</label>
+  <input id="user" autocomplete="username">
+  <label for="pass">Password</label>
+  <input id="pass" type="password" autocomplete="current-password">
+  <p><button id="loginBtn">Sign in</button></p>
+  <p id="loginErr" class="error"></p>
+  <p class="muted"><a href="index.html">Triage a log</a></p>
+</section>
+
+<section id="appView" hidden>
+  <header>
+    <h1>Triage Workflow</h1>
+    <div><span id="who" class="muted"></span> <button id="logoutBtn">Sign out</button>
+      &nbsp;<a href="index.html">Triage a log</a></div>
+  </header>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="filters">
+    <select id="fStatus"><option value="">All statuses</option></select>
+    <select id="fPriority"><option value="">All priorities</option></select>
+    <select id="fTeam"><option value="">All teams</option></select>
+    <label style="margin:0;font-weight:400"><input type="checkbox" id="fMine"> Assigned to me</label>
+    <button id="refresh">Refresh</button>
+  </div>
+  <p id="listErr" class="error"></p>
+
+  <table>
+    <thead><tr><th>#</th><th>Finding</th><th>Category</th><th>Priority</th><th>Team</th>
+      <th>Assignee</th><th>Status</th><th>ETA</th><th>Est. cost</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <p id="empty" class="muted" hidden>No findings yet. Triage a log with <code>DATABASE_URL</code> set.</p>
+
+  <section id="detail" class="detail" hidden>
+    <h2 id="dTitle"></h2>
+    <p class="muted" id="dMeta"></p>
+    <p><b>What broke:</b> <span id="dRoot"></span></p>
+    <p><b>Evidence:</b></p><pre id="dEvidence"></pre>
+    <p><b>Suggested next step:</b> <span id="dFix"></span></p>
+
+    <div class="grid">
+      <div><label for="eStatus">Status</label><select id="eStatus"></select></div>
+      <div><label for="ePriority">Priority</label><select id="ePriority"></select></div>
+      <div><label for="eTeam">Team</label><select id="eTeam"></select></div>
+      <div><label for="eAssignee">Assignee</label><select id="eAssignee"></select></div>
+      <div><label for="eEta">ETA</label><input id="eEta" type="datetime-local"></div>
+      <div><label for="eEst">Estimated hours</label><input id="eEst" type="number" min="0" step="0.5"></div>
+      <div><label for="eAct">Actual hours</label><input id="eAct" type="number" min="0" step="0.5"></div>
+    </div>
+    <label for="eNotes">Resolution notes</label>
+    <textarea id="eNotes" rows="3"></textarea>
+    <p><button id="saveBtn">Save changes</button> <span id="saveMsg" class="muted"></span></p>
+    <p id="saveErr" class="error"></p>
+
+    <h3>History</h3>
+    <div id="history" class="muted"></div>
+  </section>
+</section>
+
+<script>
+const STATUSES = ["new","triaged","assigned","in_progress","blocked","resolved","wont_fix"];
+const PRIORITIES = ["P0","P1","P2","P3","P4"];
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+// Same server that serves this page by default; a cookie only works same-origin.
+const BACKEND = location.protocol.startsWith("http") ? "" : store.get("backend", "http://localhost:8000");
+
+let me = null, teams = [], findings = [], selected = null;
+
+async function api(path, opts = {}) {
+  const res = await fetch(BACKEND + path, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) {
+    const err = new Error((body && body.detail) || `request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+// textContent only: finding text comes from a model reading arbitrary logs.
+function el(tag, text = "", cls = "") {
+  const e = document.createElement(tag);
+  e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+function fill(select, options, blank) {
+  select.replaceChildren();
+  if (blank !== undefined) select.append(new Option(blank, ""));
+  for (const [value, label] of options) select.append(new Option(label, value));
+}
+const fmtTime = (t) => t ? new Date(t).toLocaleString() : "-";
+const money = (n) => n == null ? "-" : "$" + Number(n).toFixed(0);
+function toLocalInput(t) {
+  if (!t) return "";
+  const d = new Date(t);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0, 16);
+}
+
+function show(view) {
+  $("loginView").hidden = view !== "login";
+  $("appView").hidden = view !== "app";
+}
+
+async function login() {
+  $("loginErr").textContent = "";
+  try {
+    me = await api("/api/login", { method: "POST",
+      body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
+    $("pass").value = "";
+    await start();
+  } catch (e) { $("loginErr").textContent = e.message; }
+}
+
+async function start() {
+  $("who").textContent = `${me.full_name} (${me.role}, ${me.team_name})`;
+  teams = await api("/api/teams");
+  fill($("fStatus"), STATUSES.map((s) => [s, s]), "All statuses");
+  fill($("fPriority"), PRIORITIES.map((p) => [p, p]), "All priorities");
+  fill($("fTeam"), teams.map((t) => [t.id, t.name]), "All teams");
+  fill($("eStatus"), STATUSES.map((s) => [s, s]));
+  fill($("ePriority"), PRIORITIES.map((p) => [p, p]));
+  fill($("eTeam"), teams.map((t) => [t.id, t.name]), "(unassigned)");
+  show("app");
+  await load();
+}
+
+async function load() {
+  $("listErr").textContent = "";
+  const q = new URLSearchParams();
+  if ($("fStatus").value) q.set("status", $("fStatus").value);
+  if ($("fPriority").value) q.set("priority", $("fPriority").value);
+  if ($("fTeam").value) q.set("team_id", $("fTeam").value);
+  if ($("fMine").checked) q.set("mine", "true");
+  try { findings = await api("/api/findings?" + q); }
+  catch (e) { if (e.status === 401) return show("login"); $("listErr").textContent = e.message; return; }
+  render();
+}
+
+function render() {
+  const open = findings.filter((f) => !["resolved", "wont_fix"].includes(f.status));
+  const cost = open.reduce((n, f) => n + Number(f.estimated_cost || 0), 0);
+  const hours = open.reduce((n, f) => n + Number(f.estimated_hours || 0), 0);
+  $("stats").replaceChildren(
+    ...[["Findings", findings.length], ["Open", open.length],
+        ["Open est. hours", hours.toFixed(1)], ["Open est. cost", money(cost)]].map(([label, v]) => {
+      const d = el("div", "", "stat"); d.append(el("b", String(v)), el("span", label, "muted")); return d;
+    }));
+  $("empty").hidden = findings.length > 0;
+  $("rows").replaceChildren(...findings.map((f) => {
+    const tr = document.createElement("tr");
+    if (selected && selected.id === f.id) tr.className = "sel";
+    tr.append(el("td", f.id), el("td", f.title), el("td", f.category || "-"),
+      (() => { const td = el("td"); td.append(el("span", f.priority, "pill " + f.priority)); return td; })(),
+      el("td", f.team_name || "-"), el("td", f.assignee || "-"), el("td", f.status),
+      el("td", fmtTime(f.eta)), el("td", money(f.estimated_cost)));
+    tr.addEventListener("click", () => select(f));
+    return tr;
+  }));
+}
+
+async function select(f) {
+  selected = f;
+  render();
+  $("detail").hidden = false;
+  $("saveMsg").textContent = ""; $("saveErr").textContent = "";
+  $("dTitle").textContent = `#${f.id} ${f.title}`;
+  $("dMeta").textContent = `${f.log_file} - ${f.category || "uncategorised"} - created ${fmtTime(f.created_at)}`;
+  $("dRoot").textContent = f.root_cause || "";
+  $("dEvidence").textContent = f.evidence || "";
+  $("dFix").textContent = f.suggested_fix || "";
+  $("eStatus").value = f.status;
+  $("ePriority").value = f.priority;
+  $("eTeam").value = f.assigned_team_id || "";
+  fillAssignees(f.assigned_team_id, f.assignee);
+  $("eEta").value = toLocalInput(f.eta);
+  $("eEst").value = f.estimated_hours ?? "";
+  $("eAct").value = f.actual_hours ?? "";
+  $("eNotes").value = f.resolution_notes || "";
+  // Only a lead may reassign teams; server enforces this too.
+  $("eTeam").disabled = me.role !== "lead";
+  loadHistory(f.id);
+}
+
+function fillAssignees(teamId, current) {
+  const team = teams.find((t) => String(t.id) === String(teamId));
+  fill($("eAssignee"), (team ? team.users : []).map((u) => [u.username, `${u.full_name} (${u.username})`]),
+       "(unassigned)");
+  $("eAssignee").value = current || "";
+}
+
+async function loadHistory(id) {
+  $("history").replaceChildren();
+  try {
+    const rows = await api(`/api/findings/${id}/history`);
+    $("history").replaceChildren(...rows.map((h) =>
+      el("div", `${fmtTime(h.changed_at)} - ${h.from_status || "(created)"} -> ${h.to_status} by ${h.changed_by}` +
+        (h.note ? ` - ${h.note}` : ""))));
+  } catch (e) { $("history").textContent = e.message; }
+}
+
+async function save() {
+  $("saveMsg").textContent = ""; $("saveErr").textContent = "";
+  const num = (v) => v === "" ? null : Number(v);
+  const body = {
+    status: $("eStatus").value, priority: $("ePriority").value,
+    assignee: $("eAssignee").value || null,
+    eta: $("eEta").value ? new Date($("eEta").value).toISOString() : null,
+    estimated_hours: num($("eEst").value), actual_hours: num($("eAct").value),
+    resolution_notes: $("eNotes").value,
+  };
+  if (me.role === "lead") body.assigned_team_id = $("eTeam").value ? Number($("eTeam").value) : null;
+  try {
+    const updated = await api(`/api/findings/${selected.id}`, { method: "PATCH", body: JSON.stringify(body) });
+    $("saveMsg").textContent = "Saved.";
+    await load();
+    selected = findings.find((f) => f.id === updated.id) || updated;
+    await select(selected);
+    $("saveMsg").textContent = "Saved.";
+  } catch (e) { $("saveErr").textContent = e.message; }
+}
+
+$("loginBtn").addEventListener("click", login);
+$("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+$("logoutBtn").addEventListener("click", async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch {}
+  me = null; selected = null; $("detail").hidden = true; show("login");
+});
+$("refresh").addEventListener("click", load);
+for (const id of ["fStatus", "fPriority", "fTeam", "fMine"]) $(id).addEventListener("change", load);
+$("eTeam").addEventListener("change", () => fillAssignees($("eTeam").value, ""));
+$("saveBtn").addEventListener("click", save);
+
+(async () => {
+  try { me = await api("/api/me"); await start(); }
+  catch (e) { show("login"); if (e.status === 503) $("loginErr").textContent = e.message; }
+})();
+</script>
+</body>
+</html>

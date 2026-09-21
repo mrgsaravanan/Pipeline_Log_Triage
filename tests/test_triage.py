@@ -8,8 +8,10 @@ deterministically, and for free.
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
+import zlib
 from pathlib import Path
 
 import anthropic
@@ -622,10 +624,24 @@ def test_api_image_request_carries_image_block_and_triage_prompt(monkeypatch):
     assert "cut off" in text_block["text"]  # the don't-guess-unreadable-text instruction
 
 
-def test_image_triage_refuses_cli_backend_with_clear_message():
+def test_image_triage_on_cli_backend_uses_subscription_and_read_tool(monkeypatch):
     # autouse fixture leaves the default (cli) backend in place
-    with pytest.raises(Triage.ClaudeCliError, match="image logs need the API backend"):
-        Triage.run_triage_image("shot.png", PNG_BYTES, "image/png")
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"], seen["cwd"] = cmd, kwargs["cwd"]
+        seen["bytes"] = open(os.path.join(kwargs["cwd"], "screenshot.png"), "rb").read()
+        return _completed(stdout=_cli_envelope(result=API_PAYLOAD))
+
+    monkeypatch.setattr(Triage.subprocess, "run", fake_run)
+
+    triage = Triage.run_triage_image("shot.png", PNG_BYTES, "image/png")
+
+    assert triage.failures[0].failure_type == "S3 permission denied"
+    assert seen["bytes"] == PNG_BYTES  # the CLI could read the image where the prompt points
+    assert seen["cmd"][seen["cmd"].index("--tools") + 1] == "Read"  # nothing else enabled
+    assert "screenshot.png" in seen["cmd"][2]
+    assert not os.path.exists(seen["cwd"])  # temp dir cleaned up
 
 
 def test_image_triage_shares_api_error_handling(monkeypatch):
@@ -648,13 +664,16 @@ def test_main_triages_image_file_on_api_backend(monkeypatch, capsys, tmp_path):
     assert client.calls[0]["messages"][0]["content"][0]["type"] == "image"
 
 
-def test_main_image_on_cli_backend_fails_cleanly(monkeypatch, capsys, tmp_path):
+def test_main_image_on_cli_backend_reports_cli_failure_cleanly(monkeypatch, capsys, tmp_path):
     image_file = tmp_path / "failure.png"
     image_file.write_bytes(PNG_BYTES)
     monkeypatch.setattr(sys, "argv", ["Triage.py", str(image_file)])
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(returncode=1, stderr="not logged in")
+    )
 
     assert main() == 1
-    assert "image logs need the API backend" in capsys.readouterr().err
+    assert "not logged in" in capsys.readouterr().err
 
 
 def test_main_rejects_oversized_image(monkeypatch, capsys, tmp_path):
@@ -708,9 +727,12 @@ def test_web_image_upload_is_triaged_via_api(monkeypatch):
 
 
 def test_web_image_on_cli_backend_shows_clean_error(monkeypatch):
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(returncode=1, stderr="not logged in")
+    )
     html = _post_triage(log_text="", log_file=_upload("shot.png", PNG_BYTES), access_code="")
 
-    assert "Triage failed: image logs need the API backend" in html
+    assert "Triage failed: not logged in" in html
 
 
 def test_web_rejects_oversized_image_before_calling_api(monkeypatch):
@@ -760,7 +782,7 @@ def test_web_image_upload_still_respects_access_code(monkeypatch):
 
 
 # --- optional local vector search (RAG) ---------------------------------------
-# Offline: the heavy pieces (chromadb, sentence-transformers) are faked or
+# Offline: the heavy pieces (faiss/sentence-transformers) are faked or
 # skipped, so this suite stays fast and needs neither package installed.
 
 SIMILAR = [
@@ -900,7 +922,7 @@ def test_retrieval_failure_never_breaks_triage(monkeypatch, capsys):
     monkeypatch.setenv("TRIAGE_RAG", "1")
 
     def boom(queries):
-        raise RuntimeError("chroma exploded")
+        raise RuntimeError("index exploded")
 
     monkeypatch.setattr(Triage, "_retrieve_similar", boom)
     client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
@@ -909,14 +931,14 @@ def test_retrieval_failure_never_breaks_triage(monkeypatch, capsys):
     triage = Triage.run_triage("x.log", "2024 ERROR boom")
 
     assert triage.failures[0].failure_type == "S3 permission denied"
-    assert "vector search skipped (RuntimeError: chroma exploded)" in capsys.readouterr().err
+    assert "vector search skipped (RuntimeError: index exploded)" in capsys.readouterr().err
     assert "Similar past cases" not in client.calls[0]["messages"][0]["content"]
 
 
 def test_missing_rag_packages_skip_softly(monkeypatch, capsys):
-    """The Vercel case: TRIAGE_RAG set but chromadb not installed."""
+    """The Vercel case: TRIAGE_RAG set but faiss not installed."""
     monkeypatch.setenv("TRIAGE_RAG", "1")
-    monkeypatch.setitem(sys.modules, "chromadb", None)  # makes `import chromadb` fail
+    monkeypatch.setitem(sys.modules, "faiss", None)  # makes `import faiss` fail
     client = _FakeClient(response=_FakeResponse(API_PAYLOAD))
     _use_api(monkeypatch, client)
 
@@ -948,10 +970,10 @@ def test_image_triage_does_not_use_vector_search(monkeypatch):
     not os.environ.get("RUN_RAG_INTEGRATION"),
     reason="slow: loads the real embedding model; set RUN_RAG_INTEGRATION=1 to run",
 )
-def test_real_chroma_retrieval_finds_the_right_catalog_case(monkeypatch, tmp_path):
-    pytest.importorskip("chromadb")
+def test_real_faiss_retrieval_finds_the_right_catalog_case(monkeypatch, tmp_path):
+    pytest.importorskip("faiss")
     pytest.importorskip("sentence_transformers")
-    monkeypatch.setattr(Triage, "RAG_DB_DIR", str(tmp_path / "vectors"))
+    monkeypatch.setattr(Triage, "RAG_DIR", str(tmp_path / "vectors"))
     monkeypatch.setattr(Triage, "HISTORY_FILE", str(tmp_path / "none.jsonl"))
 
     similar = Triage._retrieve_similar(
@@ -961,3 +983,239 @@ def test_real_chroma_retrieval_finds_the_right_catalog_case(monkeypatch, tmp_pat
     assert similar[0]["title"].startswith("S3 / object storage permission denied")
     assert len(similar) <= Triage.RAG_TOP_K
     assert similar == sorted(similar, key=lambda c: c["distance"])
+
+
+# --- FAISS index mechanics, with a fake embedder (fast, no model download) ------
+
+
+class _FakeEmbedder:
+    """Deterministic bag-of-words embedder: shared words => higher cosine.
+
+    Uses zlib.crc32, not hash(): str hashing is randomized per process, which
+    made the first version of this fake flaky.
+
+    Records every text it is asked to encode, so tests can assert exactly what
+    was (re-)embedded - the point of the incremental-update logic.
+    """
+
+    def __init__(self, dim=512, normalizes=True):
+        self.dim, self.normalizes, self.encoded, self.kwargs = dim, normalizes, [], []
+
+    def encode(self, texts, convert_to_numpy=True, normalize_embeddings=False):
+        import numpy as np
+
+        self.encoded.extend(texts)
+        self.kwargs.append(normalize_embeddings)
+        out = np.zeros((len(texts), self.dim), dtype="float64")  # deliberately not float32
+        for row, text in enumerate(texts):
+            for word in re.findall(r"[a-z0-9]+", text.lower()):
+                out[row, zlib.crc32(word.encode()) % self.dim] += 1.0  # stable, unlike hash()
+        if normalize_embeddings and self.normalizes:
+            out /= np.linalg.norm(out, axis=1, keepdims=True)
+        return out
+
+
+OOM_QUERY = "MemoryError unable to allocate GiB array"
+
+
+@pytest.fixture
+def faiss_env(monkeypatch, tmp_path):
+    pytest.importorskip("faiss")
+    pytest.importorskip("numpy")
+    fake = _FakeEmbedder()
+    monkeypatch.setattr(Triage, "_load_embedder", lambda: fake)
+    monkeypatch.setattr(Triage, "RAG_DIR", str(tmp_path / "vectors"))
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(tmp_path / "none.jsonl"))
+    return fake
+
+
+def test_embed_returns_unit_length_float32(faiss_env):
+    import numpy as np
+
+    vectors = Triage._embed(faiss_env, ["alpha beta", "gamma"])
+
+    assert vectors.dtype == np.float32  # FAISS refuses anything else
+    assert np.allclose(np.linalg.norm(vectors, axis=1), 1.0, atol=1e-6)
+    assert faiss_env.kwargs[-1] is True  # normalization is requested explicitly
+
+
+def test_index_rows_line_up_with_cases_and_distance_is_one_minus_cosine(faiss_env):
+    similar = Triage._retrieve_similar(["MemoryError unable to allocate GiB array"])
+
+    assert similar[0]["title"] == "Out of memory in a transform"
+    assert 0.0 <= similar[0]["distance"] <= Triage.RAG_MAX_DISTANCE
+    assert similar == sorted(similar, key=lambda c: c["distance"])
+    assert all(c["source"] == "catalog" for c in similar)
+
+
+def test_identical_text_has_distance_zero(faiss_env):
+    case = Triage.KNOWN_FAILURES[0]
+    similar = Triage._retrieve_similar([Triage._case_document(case)])
+
+    assert similar[0]["title"] == case["title"]
+    assert similar[0]["distance"] == pytest.approx(0.0, abs=1e-5)
+
+
+def test_second_call_reuses_the_saved_index_and_embeds_only_the_query(faiss_env):
+    Triage._retrieve_similar([OOM_QUERY])
+    embedded_first_time = len(faiss_env.encoded)
+    faiss_env.encoded.clear()
+
+    Triage._retrieve_similar([OOM_QUERY])
+
+    assert embedded_first_time == len(Triage.KNOWN_FAILURES) + 1  # every case + the query
+    assert faiss_env.encoded == [OOM_QUERY]  # nothing re-embedded except the query
+
+
+def test_new_history_case_is_the_only_thing_re_embedded(faiss_env, monkeypatch, tmp_path):
+    Triage._retrieve_similar([OOM_QUERY])  # builds + saves the catalog index
+    faiss_env.encoded.clear()
+
+    history = tmp_path / "h.jsonl"
+    failure = {"failure_type": "Novel thing", "what_broke": "widget jammed", "evidence": "e",
+               "next_step": "n"}
+    history.write_text(json.dumps({"timestamp": "T", "triage": {"failures": [failure]}}) + "\n")
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(history))
+
+    similar = Triage._retrieve_similar(["widget jammed"])
+
+    new_docs = [t for t in faiss_env.encoded if t != "widget jammed"]
+    assert len(new_docs) == 1 and "widget jammed" in new_docs[0]
+    assert similar[0]["source"] == "history"
+
+
+def test_a_different_embedding_model_invalidates_saved_vectors(faiss_env, monkeypatch):
+    Triage._retrieve_similar([OOM_QUERY])
+    faiss_env.encoded.clear()
+    monkeypatch.setattr(Triage, "RAG_EMBEDDING_MODEL", "some-other-model")
+
+    Triage._retrieve_similar([OOM_QUERY])
+
+    # vectors from another model must never be mixed in: everything is re-embedded
+    assert len(faiss_env.encoded) == len(Triage.KNOWN_FAILURES) + 1
+
+
+def test_mismatched_saved_files_are_rebuilt_not_trusted(faiss_env, tmp_path):
+    Triage._retrieve_similar([OOM_QUERY])
+    meta = tmp_path / "vectors" / Triage.RAG_META_NAME
+    saved = json.loads(meta.read_text())
+    saved["documents"] = saved["documents"][:-1]  # index and text file now disagree
+    meta.write_text(json.dumps(saved))
+    faiss_env.encoded.clear()
+
+    similar = Triage._retrieve_similar([OOM_QUERY])
+
+    assert similar and len(faiss_env.encoded) == len(Triage.KNOWN_FAILURES) + 1
+
+
+def test_corrupt_index_file_is_rebuilt(faiss_env, tmp_path):
+    Triage._retrieve_similar([OOM_QUERY])
+    (tmp_path / "vectors" / Triage.RAG_INDEX_NAME).write_bytes(b"not a faiss index")
+
+    assert Triage._retrieve_similar([OOM_QUERY])
+
+
+def test_fewer_cases_than_k_does_not_trip_over_faiss_padding(faiss_env, monkeypatch):
+    monkeypatch.setattr(Triage, "KNOWN_FAILURES", Triage.KNOWN_FAILURES[:2])
+    monkeypatch.setattr(Triage, "RAG_TOP_K", 5)
+
+    similar = Triage._retrieve_similar([OOM_QUERY, "AccessDenied GetObject botocore ClientError"])
+
+    assert 1 <= len(similar) <= 2
+
+
+def test_matches_beyond_max_distance_are_dropped(faiss_env, monkeypatch):
+    monkeypatch.setattr(Triage, "RAG_MAX_DISTANCE", 0.0001)
+
+    assert Triage._retrieve_similar(["zzz qqq unrelated words entirely"]) == []
+
+
+def test_multiple_queries_keep_each_cases_best_distance(faiss_env):
+    similar = Triage._retrieve_similar(
+        ["MemoryError unable to allocate GiB array", "AccessDenied GetObject botocore ClientError"]
+    )
+    titles = [c["title"] for c in similar]
+
+    assert "Out of memory in a transform" in titles
+    assert "S3 / object storage permission denied" in titles
+    assert len(titles) == len(set(titles))  # a case appears once, at its best distance
+
+
+def test_no_queries_means_no_work(faiss_env):
+    assert Triage._retrieve_similar([]) == []
+    assert faiss_env.encoded == []
+
+
+# --- local_server (backend for the static Vercel UI) ---------------------------
+
+def _local_client():
+    from fastapi.testclient import TestClient
+
+    import local_server
+
+    return TestClient(local_server.app)
+
+
+def test_local_server_triages_text_via_cli(monkeypatch):
+    ok = _completed(stdout=_cli_envelope(result=API_PAYLOAD))
+    monkeypatch.setattr(Triage.subprocess, "run", lambda *a, **k: ok)
+    monkeypatch.setattr(Triage, "HISTORY_FILE", os.devnull)
+
+    res = _local_client().post("/api/triage", json={"name": "a.log", "text": "boom"},
+                               headers={"Origin": "http://localhost:8000"})
+
+    assert res.status_code == 200
+    assert res.json()["failures"][0]["failure_type"] == "S3 permission denied"
+
+
+def test_local_server_rejects_unknown_origin_before_calling_claude(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("claude must not run for a disallowed origin")
+
+    monkeypatch.setattr(Triage.subprocess, "run", boom)
+
+    res = _local_client().post("/api/triage", json={"text": "boom"},
+                               headers={"Origin": "https://evil.example"})
+
+    assert res.status_code == 403
+
+
+def test_local_server_answers_private_network_preflight():
+    res = _local_client().options(
+        "/api/triage",
+        headers={"Origin": "http://localhost:8000", "Access-Control-Request-Method": "POST",
+                 "Access-Control-Request-Headers": "content-type",
+                 "Access-Control-Request-Private-Network": "true"},
+    )
+
+    assert res.status_code == 200
+    assert res.headers["access-control-allow-private-network"] == "true"
+
+
+def test_local_server_image_goes_through_cli_read_tool(monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return _completed(stdout=_cli_envelope(result=API_PAYLOAD))
+
+    monkeypatch.setattr(Triage.subprocess, "run", fake_run)
+    monkeypatch.setattr(Triage, "HISTORY_FILE", os.devnull)
+
+    res = _local_client().post(
+        "/api/triage", json={"name": "s.png", "image_base64": base64.b64encode(PNG_BYTES).decode()}
+    )
+
+    assert res.status_code == 200
+    assert "Read" in seen["cmd"]
+
+
+def test_local_server_surfaces_cli_failure_and_bad_input(monkeypatch):
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(returncode=1, stderr="not logged in")
+    )
+    client = _local_client()
+
+    assert "not logged in" in client.post("/api/triage", json={"text": "x"}).json()["detail"]
+    assert client.post("/api/triage", json={"text": "  "}).status_code == 400
+    assert client.post("/api/triage", json={"image_base64": "!!!"}).status_code == 400

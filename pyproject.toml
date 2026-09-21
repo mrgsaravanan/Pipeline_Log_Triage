@@ -3,9 +3,8 @@ name = "pipeline-log-triage"
 version = "0.1.0"
 description = "Triage a failed pipeline log into distinct root causes using Claude."
 requires-python = ">=3.11"
-# Runtime deps for the hosted web app. Vercel resolves these from here (it runs
-# `uv lock`, which needs this table); keep in sync with requirements.txt, which
-# the Azure Docker build and local setup still use.
+# Runtime deps; keep in sync with requirements.txt. Vercel serves only the static
+# web/ folder (see vercel.json) and does not install these.
 dependencies = [
     "pydantic>=2.0.0",
     "anthropic>=1.0.0",
@@ -19,8 +18,3 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
-
-# Vercel: serve the FastAPI app that lives in azure_app/main.py (module path
-# form; see https://vercel.com/docs/frameworks/backend/fastapi).
-[tool.vercel]
-entrypoint = "azure_app.main:app"

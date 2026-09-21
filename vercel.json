@@ -1,13 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "functions": {
-    "azure_app/main.py": {
-      "maxDuration": 60
-    }
-  },
-  "git": {
-    "deploymentEnabled": {
-      "rag-vector-search": false
-    }
-  }
+  "framework": null,
+  "buildCommand": "",
+  "installCommand": "",
+  "outputDirectory": "web"
 }

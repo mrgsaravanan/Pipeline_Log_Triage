@@ -1,47 +1,50 @@
-# Hosting on Vercel
+# Web UI: static page on Vercel + local backend on your Claude subscription
 
-The hosted version is the same FastAPI app as `azure_app/main.py`, served by
-Vercel via `[tool.vercel] entrypoint` in `pyproject.toml`, with a 60s function
-limit set in `vercel.json`. On Vercel it automatically uses the **Anthropic
-API** backend (Vercel sets `VERCEL=1`); local runs stay on the `claude` CLI.
+Vercel cannot use a Claude Pro/Max subscription (Anthropic does not allow
+routing subscription credentials through a hosted service, and a serverless
+function has no `claude login` session). So the architecture is split:
 
-The code side is done. These steps are **yours** - they involve your accounts
-and secrets, which Claude Code doesn't handle:
+```
+browser --loads--> Vercel (static web/index.html, no secrets, no server code)
+browser --fetch--> http://localhost:8000/api/triage  (local_server.py on your Mac)
+                        \-> `claude -p`  -> your Claude subscription
+```
 
-1. **API key + spend cap.** At [console.anthropic.com](https://console.anthropic.com)
-   → API Keys, create a key, and set a monthly **spend limit** first (Settings →
-   Limits). This cap is your real protection against runaway cost.
-2. **Create the Vercel project.** vercel.com → Add New → Project → import
-   `mrgsaravanan/Pipeline_Log_Triage` (this links GitHub to Vercel; framework
-   should auto-detect as FastAPI/Python). Don't deploy yet if it prompts for
-   env vars first - set them in step 3.
-3. **Environment variables** (Project → Settings → Environment Variables,
-   Production + Preview):
-   - `ANTHROPIC_API_KEY` = your key (never commit it, never paste it in chat)
-   - `TRIAGE_ACCESS_CODE` = a passphrase of your choice. **Strongly
-     recommended**: without it anyone with the URL can spend your API budget.
-4. **Deploy** (or Redeploy after adding env vars - they apply to new builds only).
-5. **Test the live URL** with a sample log (e.g. paste the contents of
-   `sample_multi_failure.log`) before sharing it.
+Nothing sensitive lives on Vercel; the log goes from your browser straight to
+your own machine.
 
-## Cost, roughly
+## Run it locally
 
-Model is `claude-haiku-4-5` ($1 / $5 per million input / output tokens): a
-typical triage is well under a cent; the worst case (a log at the 200k-char
-truncation cap) is about $0.05. The Vercel Hobby tier itself is free.
+```bash
+source .venv/bin/activate
+python local_server.py          # UI + API at http://localhost:8000
+```
 
-## Known limits
+Needs the `claude` CLI installed and logged in (`claude login`).
 
-- No real rate limiting (see DESIGN.md) - rely on the access code + spend cap.
-- Vercel request bodies are capped at ~4.5 MB; larger uploads are rejected
-  by the platform before reaching the app.
-- History (`.triage_history.jsonl`) is not persisted on Vercel.
-- Screenshots (PNG/JPEG/GIF/WebP, up to 4 MB) are supported on Vercel via the
-  API backend. Each image costs a little more than text (roughly a cent or
-  less on Haiku). Accuracy depends on how legible the screenshot is.
-- Not yet verified on a real Vercel deployment - the first deploy may need
-  tweaks (see the checklist above and report any build error).
+## Deploy the UI to Vercel
 
-- The `rag-vector-search` branch (local vector-search experiment) has its Vercel
-  auto-deploys switched off via `git.deploymentEnabled` in `vercel.json`. Remove that
-  entry if the branch is ever merged to `main`.
+1. vercel.com -> Add New -> Project -> import `mrgsaravanan/Pipeline_Log_Triage`.
+2. `vercel.json` already sets framework none and output directory `web`. No env vars.
+3. Deploy. Every push to `main` redeploys.
+4. Start the local server allowing your Vercel URL:
+
+```bash
+TRIAGE_ALLOWED_ORIGINS="https://your-app.vercel.app" python local_server.py
+```
+
+5. Open the Vercel URL; the UI calls `http://localhost:8000`. Chrome may ask to
+   allow access to local network devices - allow it.
+
+## Notes and limits
+
+- Works only on the machine running `local_server.py`, while it runs. It is a
+  personal tool, not a shared service.
+- Use Chrome, Edge or Firefox. Safari blocks HTTPS pages from calling localhost.
+- The server binds to 127.0.0.1, accepts only JSON, and rejects any browser
+  Origin not in `TRIAGE_ALLOWED_ORIGINS` (plus localhost), so other websites
+  cannot spend your subscription.
+- Screenshots go through `claude -p` with only the Read tool (see DESIGN.md).
+- The old API-key Vercel deployment (`azure_app/main.py` + `anthropic`) is no
+  longer wired to Vercel; that code remains for the Azure container and the
+  optional `TRIAGE_BACKEND=api` mode.

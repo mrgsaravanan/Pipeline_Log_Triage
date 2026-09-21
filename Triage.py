@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, ValidationError
@@ -54,13 +55,14 @@ TRUNCATE_TAIL_CHARS = 60_000
 # --- Optional local vector search ("RAG") -----------------------------------
 # Off by default; enable with TRIAGE_RAG=1. Before triaging, embed the log's
 # error lines with a free local model and pull the most similar known failure
-# cases from a local Chroma collection into the prompt as reference. Runs only
-# on a developer machine: the dependencies (chromadb + sentence-transformers,
+# cases from a local FAISS index into the prompt as reference. Runs only
+# on a developer machine: the dependencies (faiss-cpu + sentence-transformers,
 # which pulls in PyTorch) live in requirements-rag.txt, NOT in requirements.txt
 # or pyproject.toml, so the Vercel build never installs them. Every import is
 # lazy and every failure is soft - retrieval can never break a triage.
-RAG_DB_DIR = ".triage_vectors"
-RAG_COLLECTION = "triage_cases"
+RAG_DIR = ".triage_vectors"
+RAG_INDEX_NAME = "cases.faiss"  # the vectors, and nothing else (FAISS stores no text)
+RAG_META_NAME = "cases.json"  # the texts, in the same row order as the vectors
 RAG_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 RAG_TOP_K = 3
 # Cosine distance (0 identical .. 2 opposite). Anything farther than this is
@@ -420,8 +422,97 @@ def _history_cases() -> list[dict]:
     return list(cases.values())
 
 
+def _case_document(case: dict) -> str:
+    """The exact text that gets embedded (and that identifies a case on disk)."""
+    return f"{case['title']}. {case['text']}"
+
+
+def _load_embedder():
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    from sentence_transformers import SentenceTransformer
+
+    return SentenceTransformer(RAG_EMBEDDING_MODEL)
+
+
+def _embed(embedder, texts: list[str]):
+    """Texts -> float32 matrix of unit-length vectors, one row per text.
+
+    Two things FAISS will not do for you. It only accepts float32. And the
+    similarity we search with is a raw inner product, which equals cosine
+    similarity only when every vector has length 1 - so normalize here. (This
+    particular model already normalizes internally; asking again is harmless
+    and keeps the index correct if the model is ever swapped for one that
+    doesn't.)
+    """
+    import numpy as np
+
+    vectors = embedder.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+    return np.asarray(vectors, dtype="float32")
+
+
+def _saved_vectors() -> dict[str, "object"]:
+    """{document text: its saved vector} from the last-written index, or {}.
+
+    FAISS's IndexFlat keeps the raw vectors, so `reconstruct` hands them back
+    and only genuinely new texts need embedding. Everything that could make the
+    saved vectors untrustworthy returns {} (=> re-embed all): a missing or
+    unreadable file, a different embedding model, or the two files disagreeing
+    on how many cases they hold.
+    """
+    import faiss
+
+    try:
+        index = faiss.read_index(os.path.join(RAG_DIR, RAG_INDEX_NAME))
+        with open(os.path.join(RAG_DIR, RAG_META_NAME), encoding="utf-8") as f:
+            meta = json.load(f)
+        documents = meta["documents"]
+        if meta["model"] != RAG_EMBEDDING_MODEL or index.ntotal != len(documents):
+            return {}
+        return {doc: index.reconstruct(row) for row, doc in enumerate(documents)}
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def _open_index(cases: list[dict]):
+    """(embedder, FAISS index) whose row i is cases[i].
+
+    FAISS has no ids, metadata, upsert, or persistence-of-text: an index is just
+    a matrix that answers "which rows are nearest". So this function is the
+    bookkeeping a vector database does behind its collection API: keep the case list
+    and the matrix row-aligned, re-embed only what changed, and persist both.
+    """
+    import faiss  # first, so a missing package fails before the slow model load
+    import numpy as np
+
+    embedder = _load_embedder()
+    documents = [_case_document(c) for c in cases]
+
+    saved = _saved_vectors()
+    previous_documents = list(saved)
+    new_documents = [d for d in dict.fromkeys(documents) if d not in saved]
+    if new_documents:
+        for doc, vector in zip(new_documents, _embed(embedder, new_documents)):
+            saved[doc] = vector
+
+    matrix = np.stack([saved[d] for d in documents])
+    # Exact (brute-force) inner-product search. At tens to thousands of cases
+    # this is instant and *exact*; approximate indexes (HNSW, IVF, PQ) only pay
+    # off around 100k+ vectors, and a default HNSW index would be solving a scale
+    # problem this project does not have.
+    index = faiss.IndexFlatIP(matrix.shape[1])
+    index.add(matrix)
+
+    if documents != previous_documents:
+        os.makedirs(RAG_DIR, exist_ok=True)
+        faiss.write_index(index, os.path.join(RAG_DIR, RAG_INDEX_NAME))
+        with open(os.path.join(RAG_DIR, RAG_META_NAME), "w", encoding="utf-8") as f:
+            json.dump({"model": RAG_EMBEDDING_MODEL, "documents": documents}, f)
+    return embedder, index
+
+
 def _retrieve_similar(queries: list[str]) -> list[dict]:
-    """Top-k most similar known cases from a local Chroma collection.
+    """Top-k most similar known cases from a local FAISS index.
 
     Each query is searched separately; a case's score is its best (smallest)
     distance across queries. Returns dicts with title/text/source/distance,
@@ -429,48 +520,31 @@ def _retrieve_similar(queries: list[str]) -> list[dict]:
     failure (missing packages, model download, disk); callers go through
     _similar_cases_for, which turns that into a soft skip.
     """
-    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    import chromadb
-    from chromadb.utils import embedding_functions
-
-    client = chromadb.PersistentClient(
-        path=RAG_DB_DIR, settings=chromadb.Settings(anonymized_telemetry=False)
-    )
-    collection = client.get_or_create_collection(
-        name=RAG_COLLECTION,
-        embedding_function=embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=RAG_EMBEDDING_MODEL
-        ),
-        metadata={"hnsw:space": "cosine"},
-    )
-
-    cases = [{**c, "source": "catalog"} for c in KNOWN_FAILURES] + _history_cases()
-    existing = collection.get(ids=[c["id"] for c in cases])
-    have = dict(zip(existing["ids"], existing["documents"]))
-    fresh = [c for c in cases if have.get(c["id"]) != f"{c['title']}. {c['text']}"]
-    if fresh:  # embed only what is new or changed; the model load dominates anyway
-        collection.upsert(
-            ids=[c["id"] for c in fresh],
-            documents=[f"{c['title']}. {c['text']}" for c in fresh],
-            metadatas=[{"title": c["title"], "source": c["source"]} for c in fresh],
-        )
-
     if not queries:
         return []
-    result = collection.query(
-        query_texts=queries, n_results=min(RAG_TOP_K, collection.count())
-    )
-    best: dict[str, dict] = {}
-    for docs, metas, distances, ids in zip(
-        result["documents"], result["metadatas"], result["distances"], result["ids"]
-    ):
-        for doc, meta, distance, case_id in zip(docs, metas, distances, ids):
+
+    cases = [{**c, "source": "catalog"} for c in KNOWN_FAILURES] + _history_cases()
+    embedder, index = _open_index(cases)
+
+    # scores/rows are (n_queries, k) arrays. `rows` are integer positions in the
+    # matrix, not case ids: cases[row] is how we get back to the text.
+    scores, rows = index.search(_embed(embedder, queries), min(RAG_TOP_K, index.ntotal))
+
+    best: dict[int, dict] = {}
+    for query_scores, query_rows in zip(scores, rows):
+        for score, row in zip(query_scores, query_rows):
+            if row < 0:  # FAISS pads with -1 when it has fewer than k results
+                continue
+            # Inner product of unit vectors is cosine *similarity* (higher is
+            # better); convert to cosine *distance* so RAG_MAX_DISTANCE and the
+            # nearest-first ordering keep their meaning.
+            distance = max(0.0, 1.0 - float(score))
             if distance <= RAG_MAX_DISTANCE and (
-                case_id not in best or distance < best[case_id]["distance"]
+                row not in best or distance < best[row]["distance"]
             ):
-                best[case_id] = {"title": meta["title"], "text": doc,
-                                 "source": meta["source"], "distance": distance}
+                case = cases[row]
+                best[row] = {"title": case["title"], "text": case["text"],
+                             "source": case["source"], "distance": distance}
     return sorted(best.values(), key=lambda c: c["distance"])[:RAG_TOP_K]
 
 
@@ -535,16 +609,16 @@ def run_triage(log_path: str, log_text: str) -> Triage:
 
 
 def run_triage_image(image_name: str, image_bytes: bytes, media_type: str) -> Triage:
-    """Triage a screenshot of a log. Needs the API backend: the local `claude -p`
-    path has no clean way to pass an image, so it fails with a clear message."""
+    """Triage a screenshot of a log via whichever backend this environment uses.
+
+    The default (`cli`) path goes through the user's Claude subscription: the image
+    is written to a temp file and the `claude` CLI reads it with its Read tool.
+    """
     backend = _triage_backend()
     if backend == "api":
         return run_triage_via_api_image(image_name, image_bytes, media_type)
     if backend == "cli":
-        raise ClaudeCliError(
-            "image logs need the API backend (set TRIAGE_BACKEND=api and "
-            "ANTHROPIC_API_KEY); the local claude CLI path only handles text logs"
-        )
+        return run_triage_via_claude_cli_image(image_name, image_bytes, media_type)
     raise ClaudeCliError(f"unknown TRIAGE_BACKEND {backend!r} (expected 'cli' or 'api')")
 
 
@@ -609,20 +683,16 @@ def run_triage_via_api_image(image_name: str, image_bytes: bytes, media_type: st
     return _call_api(content)
 
 
-def run_triage_via_claude_cli(
-    log_path: str, log_text: str, similar_context: str = ""
-) -> Triage:
-    """Ask the claude CLI to triage a log, routed through the user's subscription."""
-    prompt = (
-        f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}\n\n"
-        f"{_log_message(log_path, log_text, similar_context)}"
-    )
-
+def _run_claude_cli(prompt: str, extra_args: list[str] | None = None,
+                    cwd: str | None = None) -> Triage:
+    """Run `claude -p` (subscription-billed) and parse its JSON reply into a Triage."""
     result = subprocess.run(
-        [CLAUDE_CLI, "-p", prompt, "--model", MODEL, "--output-format", "json"],
+        [CLAUDE_CLI, "-p", prompt, "--model", MODEL, "--output-format", "json",
+         *(extra_args or [])],
         capture_output=True,
         text=True,
         timeout=CLI_TIMEOUT_SECONDS,
+        cwd=cwd,
     )
 
     if result.returncode != 0:
@@ -645,6 +715,46 @@ def run_triage_via_claude_cli(
     return _parse_triage_text(text)
 
 
+def run_triage_via_claude_cli(
+    log_path: str, log_text: str, similar_context: str = ""
+) -> Triage:
+    """Ask the claude CLI to triage a log, routed through the user's subscription."""
+    prompt = (
+        f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}\n\n"
+        f"{_log_message(log_path, log_text, similar_context)}"
+    )
+    return _run_claude_cli(prompt)
+
+
+_IMAGE_SUFFIX = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif",
+                 "image/webp": ".webp"}
+
+
+def run_triage_via_claude_cli_image(
+    image_name: str, image_bytes: bytes, media_type: str
+) -> Triage:
+    """Triage a screenshot through the user's subscription (no API key).
+
+    `claude -p` cannot take an image on stdin, but its Read tool can view image
+    files. So the image goes to a private temp dir, and the CLI runs there with
+    only the Read tool enabled and access to only that directory.
+    """
+    with tempfile.TemporaryDirectory(prefix="triage-shot-") as tmp:
+        path = os.path.join(tmp, "screenshot" + _IMAGE_SUFFIX.get(media_type, ".png"))
+        with open(path, "wb") as f:
+            f.write(image_bytes)
+        prompt = (
+            f"{SYSTEM_PROMPT}\n\n{JSON_RESPONSE_INSTRUCTIONS}\n\n"
+            f"Use the Read tool to view the screenshot at {path} (originally named "
+            f"`{image_name}`). {IMAGE_LOG_INSTRUCTIONS}"
+        )
+        return _run_claude_cli(
+            prompt,
+            ["--tools", "Read", "--allowedTools", "Read", "--add-dir", tmp],
+            cwd=tmp,
+        )
+
+
 def _append_history(log_path: str, triage: Triage) -> None:
     """Best-effort: append this run's result to the local history file.
 
@@ -664,6 +774,19 @@ def _append_history(log_path: str, triage: Triage) -> None:
             f.write(json.dumps(record) + "\n")
     except OSError as e:
         print(f"note: could not write to history file {HISTORY_FILE}: {e}", file=sys.stderr)
+    _record_to_db(log_path, triage)
+
+
+def _record_to_db(log_path: str, triage: Triage) -> None:
+    """Also save the run to Postgres when DATABASE_URL is set (see triage_db.py).
+
+    Imported lazily so the hosted builds, which don't ship triage_db, are unaffected.
+    """
+    try:
+        from triage_db import record_run
+    except ImportError:
+        return
+    record_run(log_path, triage, MODEL)
 
 
 def print_report(triage: Triage) -> None:

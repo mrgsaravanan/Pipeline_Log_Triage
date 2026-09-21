@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pipeline Log Triage</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; }
+  }
+  body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         max-width:800px; margin:2rem auto; padding:0 1rem; }
+  textarea, input[type=text] { width:100%; box-sizing:border-box; background:var(--card);
+         color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:.5rem; }
+  textarea { height:220px; font-family:monospace; font-size:.9rem; }
+  label { display:block; margin-top:1rem; font-weight:600; }
+  button { padding:.5rem 1.5rem; font-size:1rem; margin-top:.75rem; cursor:pointer; }
+  .failure { border-left:3px solid var(--err); padding-left:1rem; margin:1.25rem 0; }
+  .notes { background:var(--card); padding:1rem; margin-top:1.5rem; border-radius:4px; }
+  .error { color:var(--err); white-space:pre-wrap; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  details { margin-top:1.5rem; }
+</style>
+</head>
+<body>
+<h1>Pipeline Log Triage</h1>
+<p class="muted"><a href="dashboard.html">Workflow dashboard</a> (sign in to assign, track and cost findings)</p>
+<p class="muted">Runs through your own Claude subscription via a server on your machine
+  (<code>python local_server.py</code>). Nothing is sent to this site's host.</p>
+
+<label for="text">Paste log text</label>
+<textarea id="text" placeholder="Paste a pipeline log..."></textarea>
+
+<label for="file">...or upload a log file / screenshot (PNG, JPEG, GIF, WebP)</label>
+<input id="file" type="file">
+
+<button id="go">Triage</button>
+<span id="status" class="muted"></span>
+<div id="out"></div>
+
+<details>
+  <summary>Settings</summary>
+  <label for="backend">Local server URL</label>
+  <input id="backend" type="text">
+</details>
+
+<script>
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+$("backend").value = store.get("backend", "http://localhost:8000");
+$("backend").addEventListener("change", () => store.set("backend", $("backend").value.trim()));
+
+function el(tag, attrs = {}, text = "") {
+  const e = document.createElement(tag);
+  Object.assign(e, attrs);
+  e.textContent = text;   // textContent, never innerHTML: model output is untrusted
+  return e;
+}
+
+function toBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+function isImage(b) {
+  return (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) ||
+         (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) ||
+         (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) ||
+         (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46);
+}
+
+async function buildRequest() {
+  const file = $("file").files[0];
+  if (!file) return { name: "(pasted text)", text: $("text").value };
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (isImage(bytes)) {
+    if (bytes.length > MAX_IMAGE_BYTES) throw new Error("Image is larger than 4 MB; please shrink it.");
+    return { name: file.name, image_base64: toBase64(bytes) };
+  }
+  if (bytes.subarray(0, 8192).includes(0)) {
+    throw new Error("That looks like a binary file. Upload a text log or a screenshot.");
+  }
+  return { name: file.name, text: new TextDecoder("utf-8").decode(bytes) };
+}
+
+function render(t) {
+  const out = $("out");
+  out.replaceChildren();
+  if (t.failures.length > 1) out.append(el("p", {}, `${t.failures.length} distinct failures found.`));
+  t.failures.forEach((f, i) => {
+    const box = el("div", { className: "failure" });
+    box.append(el("h3", {}, t.failures.length > 1 ? `${i + 1}. ${f.failure_type}` : f.failure_type));
+    for (const [label, value] of [["What broke", f.what_broke], ["Evidence", f.evidence], ["Next step", f.next_step]]) {
+      const p = el("p");
+      p.append(el("strong", {}, label + ": "), document.createTextNode(value));
+      box.append(p);
+    }
+    out.append(box);
+  });
+  if (t.notes) out.append(el("div", { className: "notes" }, "Notes: " + t.notes));
+}
+
+$("go").addEventListener("click", async () => {
+  const out = $("out"), status = $("status"), btn = $("go");
+  out.replaceChildren();
+  btn.disabled = true;
+  status.textContent = "Triaging...";
+  try {
+    const body = await buildRequest();
+    if (!body.image_base64 && !body.text.trim()) throw new Error("No log content provided.");
+    const base = $("backend").value.trim().replace(/\/$/, "");
+    let res;
+    try {
+      res = await fetch(base + "/api/triage", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch {
+      throw new Error(`Could not reach the local server at ${base}.\n` +
+        "Start it with: python local_server.py\n" +
+        "and allow this site: TRIAGE_ALLOWED_ORIGINS=" + location.origin);
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `Server error (${res.status})`);
+    render(data);
+  } catch (e) {
+    out.append(el("p", { className: "error" }, e.message));
+  } finally {
+    btn.disabled = false;
+    status.textContent = "";
+  }
+});
+</script>
+</body>
+</html>

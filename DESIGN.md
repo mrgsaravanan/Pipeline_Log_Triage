@@ -112,18 +112,20 @@ in-process limiter would be ineffective), and history persistence on Vercel
 
 `TRIAGE_RAG=1` adds a retrieval step before the model call. Nothing changes
 when it is unset, and it is **never installed on Vercel**: its dependencies
-(`chromadb`, `sentence-transformers` -> PyTorch) are in `requirements-rag.txt`,
+(`faiss-cpu`, `sentence-transformers` -> PyTorch) are in `requirements-rag.txt`,
 not `requirements.txt` / `pyproject.toml`, and every import is lazy.
 
 1. **Knowledge base.** `KNOWN_FAILURES` (12 categories: S3 permission, schema
    drift, OOM, connection timeout, data-quality rejects, missing input,
    expired credentials, disk full, Avro/schema mismatch, type conversion,
    throttling, encoding) plus past triage results from the local history
-   file, de-duplicated by content, live in a local Chroma collection
-   (`.triage_vectors/`, gitignored, rebuilt on demand; only new or changed
-   cases are re-embedded).
-2. **Embedding.** `all-MiniLM-L6-v2` via `SentenceTransformerEmbeddingFunction`:
-   free, local, no API key. Cosine distance.
+   file, de-duplicated by content, live in a local FAISS index
+   (`.triage_vectors/cases.faiss` = the vectors, `cases.json` = the texts in
+   the same row order; gitignored, rebuilt on demand; only new or changed
+   cases are re-embedded - see below).
+2. **Embedding.** `all-MiniLM-L6-v2` via `sentence-transformers`: free, local, no
+   API key. Vectors are L2-normalized so inner product = cosine similarity;
+   distance is reported as `1 - similarity`.
 3. **Query.** One short query per distinct error-ish line of the log (max 8,
    300 chars each), searched separately and merged by best distance, so each
    failure in a multi-failure log can pull in its own case. One embedding of
@@ -151,13 +153,55 @@ Known limits, stated plainly:
   seconds to load it (the web app would pay once per process).
 - **History is not de-noised:** a wrong past triage becomes a "known case".
 
+### What the Chroma -> FAISS swap exposed
+
+The retrieval was first built on Chroma and rebuilt on FAISS with the same
+model. Rankings and scores were identical on every log compared (Chroma's
+approximate HNSW and FAISS's exact search agree at this scale). What changed
+is that FAISS is a search *library*, not a database, so everything Chroma did
+behind `collection.query()` is now explicit code in `Triage.py`:
+
+- **An index is only a matrix.** `index.search()` returns float scores and
+  integer *row positions*. No text, no ids, no metadata. `cases.faiss` is
+  exactly `n * 384 * 4` bytes plus a header; the texts live in `cases.json`,
+  and `_open_index` keeps the two row-aligned. If they disagree (different
+  counts, different model) the saved vectors are discarded, not trusted.
+- **No upsert.** Adding a vector twice yields two rows; there is no "update by
+  id". Incremental updates are done by `reconstruct`-ing the saved vectors of
+  unchanged cases and embedding only the new ones, then rebuilding the flat
+  index (instant at this size).
+- **Cosine is your responsibility.** `IndexFlatIP` is a raw inner product. It
+  equals cosine similarity only for unit-length vectors, so `_embed`
+  normalizes and casts to float32 (FAISS rejects float64). all-MiniLM-L6-v2
+  already normalizes internally (its pipeline ends in a `Normalize` module),
+  so the explicit step is a guard for a future model swap, not a fix today.
+  Without it a longer, less relevant vector outranks a better match (demoed:
+  a 60%-relevant case stored at 2x length beat a perfect match).
+- **You pick the search algorithm.** Chroma silently used HNSW, an
+  *approximate* graph index. FAISS makes you choose. `IndexFlatIP` is exact
+  brute force: right for tens to thousands of cases. Approximate indexes
+  trade recall for speed only at ~100k+ vectors, and are tunable but not
+  exact (on 20k synthetic clustered vectors HNSW recall@10 rose from 15% to
+  82% as `efSearch` went 16 -> 256; synthetic high-dimensional data is a hard
+  case, so read that as "approximate and tunable", not as typical numbers).
+- **Score direction and padding.** FAISS returns similarity (higher = better)
+  and pads with `-1` when asked for more results than exist; both are handled
+  in `_retrieve_similar`.
+
+Retrieval-quality finding (independent of the engine): a case can score low
+against a clearly matching log line - S3 `AccessDenied` scored 0.41 against
+the S3 catalog case. Stripping the timestamp/level/component prefix did not
+fix it (0.41 -> 0.42), so it is this small model matching noisy log lines to
+prose descriptions, not boilerplate dilution. Not changed.
+
 ## Screenshot ("image log") triage
 
 Uploading a PNG/JPEG/GIF/WebP screenshot of a log triages it with the same
-prompt, using the model's vision. **API backend only**: the local
-`claude -p` path has no clean way to pass an image, so it fails with a clear
-message (`run_triage_image`). Locally, `TRIAGE_BACKEND=api python Triage.py
-shot.png` works too.
+prompt, using the model's vision. **Default (`cli`) backend, no API key:** the
+image is written to a private temp dir and `claude -p` runs there with only the
+`Read` tool enabled (`--tools Read --add-dir <tmp>`), which lets it view the
+image through the user's Claude subscription (`run_triage_via_claude_cli_image`).
+The `api` backend (Vercel) sends it as a native image block instead.
 
 - Images are recognized by **magic bytes** (`detect_image_media_type`), not
   filename or client-supplied content type, which can lie.
@@ -257,6 +301,56 @@ a busy system). Left unfixed since it wasn't asked for and would be scope
 creep beyond "decide what persists and wire it up" - worth adding (e.g. cap
 at the last N records, or prune by age) before this runs in any automated
 context.
+
+## Postgres workflow + dashboard - optional, local only
+
+With `DATABASE_URL` set, each triage is also saved to a local Postgres so the
+findings can be assigned, tracked and costed by teams. Unset, none of this
+runs: the CLI, tests and the Vercel/Azure builds are unaffected.
+
+- **Setup:** `pip install -r requirements-db.txt` (`psycopg` is imported
+  lazily and deliberately not in `requirements.txt`, which the hosted builds
+  install). `python seed_db.py` applies `schema.sql`, creates 3 teams and 2
+  users per team (one `lead`, one `engineer`), and prints each new user's
+  random password once. Only a salted scrypt hash is stored, so a lost
+  password means deleting the user row and re-seeding. Re-running is safe;
+  existing users are never overwritten.
+- **Tables:** `teams` (with an hourly rate for costing), `users`,
+  `triage_runs` (one per log), `triage_findings` (one per distinct root
+  cause - the unit that gets triaged and tracked) and
+  `finding_status_history` (audit trail).
+- **Save hook:** `_append_history()` also calls `_record_to_db()` ->
+  `triage_db.record_run()`, so the CLI, `local_server.py` and the hosted
+  backends all share one path. It is best-effort like the JSONL history: a
+  database failure prints a stderr note and never loses the report.
+- **Routing is rule-based, not Claude-generated.** `triage_db.classify()`
+  matches keywords in `failure_type`/`what_broke` to a category and owning
+  team (`CATEGORY_RULES`, first match wins, fallback `other` ->
+  Application Engineering). Priority is P1/high for the first failure (the
+  run's blocker, per the prompt's ordering) and P2/medium for the rest.
+  Estimated hours come from the category, cost is hours x the team's rate,
+  and the default ETA is twice the estimate. These are placeholders a human
+  edits in the dashboard. **Next step, not built:** have Claude return
+  category, priority and an effort estimate per failure - that means
+  extending the `Failure` model and prompt, and updating the existing tests.
+- **Auth and permissions:** `POST /api/login` sets an HMAC-signed, HttpOnly,
+  SameSite=Lax cookie (8h). The signing key is `TRIAGE_SECRET_KEY`, or a
+  random per-process key, in which case restarting the server signs everyone
+  out. Anyone signed in can read all findings; an engineer can edit only
+  findings assigned to their team, and only a lead can reassign teams.
+  Assignees must belong to the assigned team. Editing hours re-costs the
+  finding; changing status writes a history row and sets or clears
+  `resolved_at`.
+- **Dashboard:** `web/dashboard.html`, served by `local_server.py` at
+  `http://localhost:8000/dashboard.html`. It uses the session cookie, so it
+  works same-origin only - it does not work from the Vercel-hosted page.
+  Model-written text is rendered with `textContent`, never `innerHTML`.
+- **Known gaps:** no login rate limiting or lockout; no password change or
+  user management UI; plain `http` on localhost; no automated tests of the
+  FastAPI routes beyond a manual smoke test (the `triage_db` logic is covered
+  by `tests/test_triage_db.py` with a fake connection, not a real Postgres);
+  `schema.sql` renames a pre-existing early-prototype `triage_runs` table to
+  `triage_runs_old` instead of dropping it.
 
 ## Multi-failure fixture
 

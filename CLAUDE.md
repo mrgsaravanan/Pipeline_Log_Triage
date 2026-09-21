@@ -35,6 +35,17 @@ with `TRIAGE_RAG=1` (see DESIGN.md). Local only - never add these packages to
 `requirements.txt` or `pyproject.toml`, which Vercel installs (PyTorch would
 break the build). The gated real-model test runs with `RUN_RAG_INTEGRATION=1`.
 
+## Workflow dashboard (optional, local Postgres)
+
+With `DATABASE_URL` set, every triage run is also saved to Postgres
+(`triage_db.py`), each failure auto-classified and routed to one of 3 teams.
+`python seed_db.py` creates the tables, 3 teams and 2 users per team, and
+prints the random passwords once. Sign in at `http://localhost:8000/dashboard.html`
+(served by `local_server.py`) to assign, track and cost findings; see
+DESIGN.md's "Postgres workflow" section. Keep the password out of the URL
+(`PGPASSWORD` env var works for special characters). Install with
+`pip install -r requirements-db.txt` - never add `psycopg` to `requirements.txt`.
+
 ## Build / test gate
 
 ```bash
@@ -60,13 +71,12 @@ from the root build gate do cover `azure_app/main.py`'s syntax/lint, but
 there's no automated test coverage of the FastAPI endpoints themselves yet
 — verified only via a manual local smoke test so far.
 
-## Web frontend (Vercel)
+## Web frontend (Vercel + local backend)
 
-The same FastAPI app also deploys to Vercel (config: `[tool.vercel]` in
-`pyproject.toml`, `vercel.json`). There it uses the API backend. See
-[VERCEL.md](VERCEL.md) for the steps only the owner can do (API key + spend
-cap, Vercel project, env vars) and the security notes. Never commit an API
-key; `TRIAGE_ACCESS_CODE` should be set on any public deployment.
+`web/index.html` is a static UI deployed to Vercel (`vercel.json`). It calls
+[`local_server.py`](local_server.py), which runs on the owner's machine and
+triages via the `claude` CLI (Claude subscription, no API key). Vercel itself
+never calls Claude. See [VERCEL.md](VERCEL.md).
 
 ## Working conventions for Claude Code in this repo
 
