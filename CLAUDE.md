@@ -44,7 +44,14 @@ prints the random passwords once. Sign in at `http://localhost:8000/dashboard.ht
 (served by `local_server.py`) to assign, track and cost findings; see
 DESIGN.md's "Postgres workflow" section. Keep the password out of the URL
 (`PGPASSWORD` env var works for special characters). Install with
-`pip install -r requirements-db.txt` - never add `psycopg` to `requirements.txt`.
+`pip install -r requirements-db.txt`.
+
+Hosted dashboard: `api/index.py` is a Vercel serverless function serving only
+the workflow routes (login, findings) against a hosted Postgres (Neon). Set
+`DATABASE_URL` and `TRIAGE_SECRET_KEY` in the Vercel project. Triage itself
+still runs locally via `local_server.py` (same `DATABASE_URL`), so the
+dashboard works with the laptop off. `psycopg[binary]` is therefore in
+`requirements.txt`/`pyproject.toml` for Vercel.
 
 ## Build / test gate
 

@@ -4,6 +4,7 @@ Mounted by local_server.py. Sessions are an HMAC-signed, HttpOnly, SameSite=Lax
 cookie; every route needs DATABASE_URL (see triage_db.py).
 """
 
+import os
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -62,7 +63,8 @@ def login(req: LoginRequest, response: Response) -> dict:
     if not user:
         raise HTTPException(401, "wrong username or password")
     response.set_cookie(COOKIE, triage_db.make_token(user["id"]), httponly=True,
-                        samesite="lax", max_age=triage_db.SESSION_SECONDS)
+                        samesite="lax", secure=bool(os.environ.get("VERCEL")),
+                        max_age=triage_db.SESSION_SECONDS)
     return user
 
 
