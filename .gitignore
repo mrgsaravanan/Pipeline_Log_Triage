@@ -45,3 +45,4 @@ __pycache__/
 
 # Local vector-search index (TRIAGE_RAG=1) - per-machine, rebuilt on demand
 .triage_vectors/
+.vercel
