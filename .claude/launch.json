@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "local-server",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["local_server.py"],
+      "port": 8000
+    }
+  ]
+}
