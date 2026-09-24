@@ -68,6 +68,11 @@ browser --> Vercel (static UI in web/ + dashboard API in api/index.py)
     out-of-memory failure rated critical) produced an alert in the channel,
     confirmed by the owner. (A stray `invalid_payload` seen earlier came from
     testing the webhook outside the app; Slack only accepts a JSON POST.)
+13. **Email alerts.** The owner set the SMTP variables on the Azure app and
+    replaced the seeded placeholder `oncall_email` addresses in the `teams` table
+    with real ones. A test triage (`email-alert-test`, an S3 permission failure)
+    produced an email to the Platform & Infrastructure on-call address, confirmed
+    by the owner.
 
 ## Improvements implemented
 
@@ -112,15 +117,16 @@ Verified: build gate clean (144 tests); Vercel deploys from `main`; Azure
 `/api/triage` returns structured results with severity, confidence and a suggested
 fix; access-code, CI-token and rate-limit paths; a triage run saved to Neon and
 visible on the dashboard; sign-in and triage working on both pages and a Slack
-alert delivered (both confirmed by the owner).
+Slack alert and an email alert delivered (all confirmed by the owner).
 
-Not verified: email alerts (no SMTP configured); the trends panel,
+Not verified: the trends panel,
 Markdown export and print/PDF buttons in a browser; the GitHub Action example
 against a real repo; cold-start latency of the Azure container.
 
 ## Open items and cautions
 
-- Slack alerts are on. Email alerts stay off until the SMTP settings are set.
+- Slack and email alerts are both on. Email goes to each team's `oncall_email`
+  in the `teams` table, so keep those addresses current.
 - The rate limiter is per instance and resets on restart.
 - The Azure B1 plan and registry are billed; the Claude OAuth token from
   `claude setup-token` lasts a year. Revoke it if the deployment is torn down or
