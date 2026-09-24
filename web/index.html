@@ -144,5 +144,35 @@ $("go").addEventListener("click", async () => {
   }
 });
 </script>
+<style>
+  #themebar { position:fixed; top:.5rem; right:.75rem; display:flex; gap:.4rem; align-items:center;
+              font-size:.8rem; color:var(--muted); }
+  #themebar input { width:2rem; height:1.6rem; padding:0; border:1px solid var(--line); background:none; cursor:pointer; }
+  #themebar button { font-size:.75rem; padding:.15rem .5rem; margin:0; }
+</style>
+<div id="themebar">Background <input id="bgpick" type="color" value="#ffffff" aria-label="Background colour">
+  <button id="bgreset" type="button">Reset</button></div>
+<script>
+(function () {
+  const KEY = "theme_bg", root = document.documentElement.style;
+  const get = () => { try { return localStorage.getItem(KEY); } catch { return null; } };
+  const set = (v) => { try { v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY); } catch {} };
+  function apply(hex) {
+    if (!hex) { ["--bg", "--fg", "--card", "--line", "--muted"].forEach((p) => root.removeProperty(p)); return; }
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+    const light = (0.299 * r + 0.587 * g + 0.114 * b) > 150;
+    const mix = (t, a) => "#" + [r, g, b].map((c) => Math.round(c + (t - c) * a).toString(16).padStart(2, "0")).join("");
+    root.setProperty("--bg", hex);
+    root.setProperty("--fg", light ? "#1a1a1a" : "#eeeeee");
+    root.setProperty("--muted", light ? "#555555" : "#aaaaaa");
+    root.setProperty("--card", mix(light ? 0 : 255, 0.06));
+    root.setProperty("--line", mix(light ? 0 : 255, 0.2));
+  }
+  const pick = document.getElementById("bgpick"), saved = get();
+  if (saved) { pick.value = saved; apply(saved); }
+  pick.addEventListener("input", () => { apply(pick.value); set(pick.value); });
+  document.getElementById("bgreset").addEventListener("click", () => { set(null); apply(null); pick.value = "#ffffff"; });
+})();
+</script>
 </body>
 </html>
