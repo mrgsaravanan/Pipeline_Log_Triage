@@ -155,9 +155,9 @@ def test_save_run_routes_and_costs_each_failure():
     # (run_id, title, root_cause, evidence, fix, category, severity, priority, team, status,
     #  eta, hours, cost)
     assert first[5:10] == ("permissions", "high", "P1", 1, "assigned")
-    assert first[11:] == (2, 180.0)
+    assert first[11:13] == (2, 180.0)
     assert second[5:10] == ("schema_drift", "medium", "P2", 2, "assigned")
-    assert second[11:] == (6, 480.0)
+    assert second[11:13] == (6, 480.0)
     assert len(conn.sql("INSERT INTO finding_status_history")) == 2
 
 

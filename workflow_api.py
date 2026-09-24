@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 import triage_db
@@ -26,6 +27,10 @@ def _db():
     except Exception as e:  # noqa: BLE001
         raise HTTPException(503, f"could not connect to Postgres: {e}") from e
     with conn:
+        try:
+            triage_db.ensure_migrated(conn)
+        except Exception:  # noqa: BLE001 - reads still work on an older schema
+            conn.rollback()
         yield conn
 
 
@@ -65,7 +70,7 @@ def login(req: LoginRequest, response: Response) -> dict:
     response.set_cookie(COOKIE, triage_db.make_token(user["id"]), httponly=True,
                         samesite="lax", secure=bool(os.environ.get("VERCEL")),
                         max_age=triage_db.SESSION_SECONDS)
-    return user
+    return {**user, "token": triage_db.make_token(user["id"])}
 
 
 @router.post("/logout")
@@ -99,6 +104,23 @@ def findings(status: str = "", team_id: int | None = None, priority: str = "",
 def history(finding_id: int, user: dict = Depends(current_user)) -> list[dict]:
     with _db() as conn:
         return triage_db.finding_history(conn, finding_id)
+
+
+@router.get("/findings/{finding_id}/export", response_class=PlainTextResponse)
+def export(finding_id: int, user: dict = Depends(current_user)) -> PlainTextResponse:
+    with _db() as conn:
+        finding = triage_db.get_finding(conn, finding_id)
+    if not finding:
+        raise HTTPException(404, "finding not found")
+    return PlainTextResponse(
+        triage_db.finding_markdown(finding), media_type="text/markdown",
+        headers={"Content-Disposition": f'attachment; filename="finding-{finding_id}.md"'})
+
+
+@router.get("/trends")
+def trends(user: dict = Depends(current_user)) -> dict:
+    with _db() as conn:
+        return triage_db.trends(conn)
 
 
 @router.patch("/findings/{finding_id}")

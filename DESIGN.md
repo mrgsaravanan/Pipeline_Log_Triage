@@ -382,3 +382,28 @@ below). Neither fixture is tracked in git - both fall under the repo's
   crash) and was reverted. This class of bug (truncation on multi-failure
   logs) is exactly what `sample_multi_failure.log` exists to catch - run it
   after touching any token/length-related setting.
+
+## Triage improvements (severity, repeats, alerts, CI, trends)
+
+- **Per-failure severity, confidence and suggested fix.** `Failure` carries
+  `severity` (critical/high/medium/low), `confidence` (0-1, clamped) and an
+  optional `suggested_fix`, all defaulted so older reports still validate. Priority
+  follows severity; the run's first failure is never below P1. The suggested fix is
+  always labelled an AI suggestion.
+- **Repeat detection.** Each finding stores a `signature` (category plus the failure
+  label with numbers/ids stripped). The dashboard shows "Nx" and a recurring list.
+  `triage_db.ensure_migrated` adds the new columns on first use, so no manual step.
+- **Alerts.** `notify.py` posts P0/P1 or 3x-repeat findings to `TRIAGE_WEBHOOK_URL`
+  (Slack/Teams) and optionally emails the team's on-call via SMTP env vars.
+  Best-effort: a failed alert never fails a triage.
+- **CI.** `POST /api/triage` on the Azure app accepts `Authorization: Bearer
+  $TRIAGE_INGEST_TOKEN`; see `docs/github-action-example.yml`.
+- **Auth and rate limits (Azure app).** Callers may use the CI token, a signed-in
+  user's token (needs the same `TRIAGE_SECRET_KEY` as the dashboard), or the shared
+  access code; 10 requests/minute per caller (`TRIAGE_RATE_LIMIT`, in memory per
+  instance).
+- **Input handling.** UTF-16 (BOM) logs decode correctly; oversized logs keep
+  error-like lines from the omitted middle in addition to head and tail.
+- **Dashboard.** `/api/trends` (weekly volume, categories, cost per team, MTTR,
+  repeats) and per-finding Markdown export; the triage page can download a report
+  or print to PDF.

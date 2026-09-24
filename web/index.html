@@ -11,7 +11,7 @@
   }
   body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
          max-width:800px; margin:2rem auto; padding:0 1rem; }
-  textarea, input[type=text] { width:100%; box-sizing:border-box; background:var(--card);
+  textarea, input[type=text], input[type=password] { width:100%; box-sizing:border-box; background:var(--card);
          color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:.5rem; }
   textarea { height:220px; font-family:monospace; font-size:.9rem; }
   label { display:block; margin-top:1rem; font-weight:600; }
@@ -21,6 +21,10 @@
   .error { color:var(--err); white-space:pre-wrap; }
   .muted { color:var(--muted); font-size:.85rem; }
   details { margin-top:1.5rem; }
+  .badge { font-size:.75rem; padding:.05rem .45rem; border-radius:10px; border:1px solid var(--line); margin-left:.4rem; }
+  .fix { background:var(--card); padding:.6rem; border-radius:4px; white-space:pre-wrap; font-family:monospace; font-size:.85rem; }
+  .actions { margin-top:1rem; }
+  @media print { #themebar, #go, .actions, details, textarea, label, input { display:none !important; } }
 </style>
 </head>
 <body>
@@ -43,8 +47,12 @@
   <summary>Settings</summary>
   <label for="backend">Triage server URL</label>
   <input id="backend" type="text">
-  <label for="code">Access code</label>
+  <label for="code">Access code (or sign in below)</label>
   <input id="code" type="password" autocomplete="off">
+  <label for="user">Sign in with your dashboard account</label>
+  <input id="user" type="text" placeholder="username" autocomplete="username">
+  <input id="pass" type="password" placeholder="password" autocomplete="current-password">
+  <button id="signin" type="button">Sign in</button> <span id="signinMsg" class="muted"></span>
 </details>
 
 <script>
@@ -60,6 +68,42 @@ $("backend").value = store.get("backend", DEFAULT_BACKEND);
 $("backend").addEventListener("change", () => store.set("backend", $("backend").value.trim()));
 $("code").value = store.get("code", "");
 $("code").addEventListener("change", () => store.set("code", $("code").value));
+
+const session = {
+  get() { try { return sessionStorage.getItem("token") || ""; } catch { return ""; } },
+  set(v) { try { v ? sessionStorage.setItem("token", v) : sessionStorage.removeItem("token"); } catch {} },
+};
+if (session.get()) $("signinMsg").textContent = "Signed in.";
+$("signin").addEventListener("click", async () => {
+  $("signinMsg").textContent = "";
+  try {
+    const res = await fetch(location.origin + "/api/login", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: $("user").value.trim(), password: $("pass").value }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.token) throw new Error(data.detail || `Sign-in failed (${res.status})`);
+    session.set(data.token);
+    $("pass").value = "";
+    $("signinMsg").textContent = `Signed in as ${data.full_name}.`;
+  } catch (e) { $("signinMsg").textContent = e.message; }
+});
+function authHeaders() {
+  const token = session.get();
+  return token ? { Authorization: "Bearer " + token } : { "X-Access-Code": $("code").value };
+}
+
+function reportMarkdown(t) {
+  const lines = ["# Pipeline log triage", ""];
+  t.failures.forEach((f, i) => {
+    lines.push(`## ${i + 1}. ${f.failure_type}`, "",
+      `- Severity: ${f.severity || "medium"} (confidence ${Math.round((f.confidence ?? 0.5) * 100)}%)`, "",
+      `**What broke:** ${f.what_broke}`, "", "**Evidence:**", "```", f.evidence, "```", "",
+      `**Next step:** ${f.next_step}`, "");
+    if (f.suggested_fix) lines.push("**Suggested fix (AI suggestion - review before running):**", "```", f.suggested_fix, "```", "");
+  });
+  if (t.notes) lines.push("## Notes", t.notes, "");
+  return lines.join("\n");
+}
 
 function el(tag, attrs = {}, text = "") {
   const e = document.createElement(tag);
@@ -91,10 +135,12 @@ async function buildRequest() {
     if (bytes.length > MAX_IMAGE_BYTES) throw new Error("Image is larger than 4 MB; please shrink it.");
     return { name: file.name, image_base64: toBase64(bytes) };
   }
-  if (bytes.subarray(0, 8192).includes(0)) {
+  const utf16 = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le"
+              : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : null;
+  if (!utf16 && bytes.subarray(0, 8192).includes(0)) {
     throw new Error("That looks like a binary file. Upload a text log or a screenshot.");
   }
-  return { name: file.name, text: new TextDecoder("utf-8").decode(bytes) };
+  return { name: file.name, text: new TextDecoder(utf16 || "utf-8").decode(bytes) };
 }
 
 function render(t) {
@@ -103,15 +149,33 @@ function render(t) {
   if (t.failures.length > 1) out.append(el("p", {}, `${t.failures.length} distinct failures found.`));
   t.failures.forEach((f, i) => {
     const box = el("div", { className: "failure" });
-    box.append(el("h3", {}, t.failures.length > 1 ? `${i + 1}. ${f.failure_type}` : f.failure_type));
+    const h = el("h3", {}, t.failures.length > 1 ? `${i + 1}. ${f.failure_type}` : f.failure_type);
+    h.append(el("span", { className: "badge" },
+      `${f.severity || "medium"} - ${Math.round((f.confidence ?? 0.5) * 100)}% sure`));
+    box.append(h);
     for (const [label, value] of [["What broke", f.what_broke], ["Evidence", f.evidence], ["Next step", f.next_step]]) {
       const p = el("p");
       p.append(el("strong", {}, label + ": "), document.createTextNode(value));
       box.append(p);
     }
+    if (f.suggested_fix) {
+      box.append(el("p", {}, "Suggested fix (an AI suggestion - review before running):"),
+                 el("div", { className: "fix" }, f.suggested_fix));
+    }
     out.append(box);
   });
   if (t.notes) out.append(el("div", { className: "notes" }, "Notes: " + t.notes));
+  const actions = el("div", { className: "actions" });
+  const dl = el("button", { type: "button" }, "Download report (.md)");
+  dl.addEventListener("click", () => {
+    const a = el("a", { href: URL.createObjectURL(new Blob([reportMarkdown(t)], { type: "text/markdown" })),
+                        download: "triage-report.md" });
+    a.click(); URL.revokeObjectURL(a.href);
+  });
+  const pr = el("button", { type: "button" }, "Print / save as PDF");
+  pr.addEventListener("click", () => window.print());
+  actions.append(dl, " ", pr);
+  out.append(actions);
 }
 
 $("go").addEventListener("click", async () => {
@@ -127,7 +191,7 @@ $("go").addEventListener("click", async () => {
     try {
       res = await fetch(base + "/api/triage", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "X-Access-Code": $("code").value },
+        headers: { "Content-Type": "application/json", ...authHeaders() },
         body: JSON.stringify(body),
       });
     } catch {

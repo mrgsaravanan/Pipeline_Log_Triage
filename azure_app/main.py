@@ -16,6 +16,8 @@ import os
 import secrets
 import subprocess
 import sys
+import time
+from collections import defaultdict, deque
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -31,6 +33,7 @@ from Triage import (
     ClaudeCliError,
     _append_history,
     _truncate_log_text,
+    decode_log_bytes,
     detect_image_media_type,
     run_triage,
     run_triage_image,
@@ -48,7 +51,7 @@ app.add_middleware(
         if o.strip()
     ],
     allow_methods=["POST"],
-    allow_headers=["Content-Type", "X-Access-Code"],
+    allow_headers=["Content-Type", "X-Access-Code", "Authorization"],
 )
 
 PAGE_HEAD = """<!doctype html>
@@ -93,6 +96,51 @@ def _access_ok(provided: str) -> bool:
     if not expected:
         return True
     return secrets.compare_digest(provided.encode(), expected.encode())
+
+
+# ----------------------------------------------------- API auth + rate limiting
+# A caller may present, in order: the CI ingest token (Authorization: Bearer
+# <TRIAGE_INGEST_TOKEN>), a signed-in user's session token (the `token` returned
+# by /api/login, valid when TRIAGE_SECRET_KEY matches the dashboard's), or the
+# shared access code. With none of these configured the API is open, as before.
+
+RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRIAGE_RATE_LIMIT", "10"))
+_hits: dict[str, deque] = defaultdict(deque)
+
+
+def _bearer(authorization: str) -> str:
+    return authorization[7:].strip() if authorization.lower().startswith("bearer ") else ""
+
+
+def _identity(access_code: str, authorization: str) -> str | None:
+    """Who is calling ('ci', 'user:<id>', 'code'), or None if not allowed."""
+    bearer = _bearer(authorization)
+    ingest = os.environ.get("TRIAGE_INGEST_TOKEN", "")
+    if bearer and ingest and secrets.compare_digest(bearer.encode(), ingest.encode()):
+        return "ci"
+    if bearer:
+        try:
+            import triage_db
+            user_id = triage_db.read_token(bearer)
+        except ImportError:
+            user_id = None
+        if user_id is not None:
+            return f"user:{user_id}"
+    if _expected_access_code():
+        return "code" if _access_ok(access_code) else None
+    return None if (ingest or os.environ.get("TRIAGE_SECRET_KEY")) else "open"
+
+
+def _rate_limited(identity: str, now: float | None = None) -> bool:
+    """Sliding one-minute window per caller; True when the caller is over the limit."""
+    now = time.monotonic() if now is None else now
+    hits = _hits[identity]
+    while hits and now - hits[0] > 60:
+        hits.popleft()
+    if len(hits) >= RATE_LIMIT_PER_MINUTE:
+        return True
+    hits.append(now)
+    return False
 
 
 def _form_html() -> str:
@@ -157,7 +205,7 @@ async def triage(
                 return PAGE_HEAD + _form_html() + f'<p class="error">{error}</p>' + PAGE_TAIL
             image = (media_type, raw)
             text = ""
-        elif b"\x00" in raw[:8192]:
+        elif b"\x00" in raw[:8192] and not raw.startswith((b"\xff\xfe", b"\xfe\xff")):
             # Not text and not a supported image (PDF, zip, UTF-16 text, ...):
             # decoding it would only send gibberish to the model.
             error = (
@@ -166,10 +214,7 @@ async def triage(
             )
             return PAGE_HEAD + _form_html() + f'<p class="error">{error}</p>' + PAGE_TAIL
         else:
-            try:
-                text = raw.decode("utf-8")
-            except UnicodeDecodeError:
-                text = raw.decode("latin-1")
+            text, _ = decode_log_bytes(raw)
     else:
         text = log_text
         source_name = "(pasted text)"
@@ -213,10 +258,14 @@ class TriageRequest(BaseModel):
 
 
 @app.post("/api/triage")
-def api_triage(req: TriageRequest, x_access_code: str = Header(default="")) -> dict:
-    """JSON endpoint for the Vercel UI; same behavior as local_server.py."""
-    if not _access_ok(x_access_code):
-        raise HTTPException(401, "incorrect access code")
+def api_triage(req: TriageRequest, x_access_code: str = Header(default=""),
+               authorization: str = Header(default="")) -> dict:
+    """JSON endpoint for the Vercel UI and CI jobs; same behavior as local_server.py."""
+    identity = _identity(x_access_code, authorization)
+    if identity is None:
+        raise HTTPException(401, "not signed in or incorrect access code")
+    if _rate_limited(identity):
+        raise HTTPException(429, "too many triage requests; try again in a minute")
     try:
         if req.image_base64:
             try:

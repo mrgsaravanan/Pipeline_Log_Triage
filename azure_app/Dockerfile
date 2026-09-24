@@ -35,6 +35,7 @@ RUN pip install --no-cache-dir -r azure_app/requirements.txt
 # App code: the CLI script this app wraps, plus the web app itself.
 COPY Triage.py ./Triage.py
 COPY triage_db.py ./triage_db.py
+COPY notify.py ./notify.py
 COPY azure_app/main.py ./azure_app/main.py
 COPY azure_app/docker-entrypoint.sh ./azure_app/docker-entrypoint.sh
 RUN chmod +x ./azure_app/docker-entrypoint.sh

@@ -84,6 +84,11 @@ CREATE TABLE IF NOT EXISTS finding_status_history (
     changed_at  TIMESTAMPTZ DEFAULT now()
 );
 
+-- Added after the first release; safe to re-run.
+ALTER TABLE triage_findings ADD COLUMN IF NOT EXISTS signature TEXT;
+ALTER TABLE triage_findings ADD COLUMN IF NOT EXISTS proposed_fix TEXT;
+CREATE INDEX IF NOT EXISTS idx_findings_signature ON triage_findings (signature);
+
 CREATE INDEX IF NOT EXISTS idx_findings_status_priority ON triage_findings (status, priority);
 CREATE INDEX IF NOT EXISTS idx_findings_team ON triage_findings (assigned_team_id);
 

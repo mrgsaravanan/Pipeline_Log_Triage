@@ -15,7 +15,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
 CLAUDE_CLI = "claude"
 MODEL = "claude-haiku-4-5"
@@ -215,6 +215,13 @@ For each distinct failure, give:
 - what_broke: the real root failure in plain English, not downstream noise.
 - evidence: the specific lines or values in the log that point to it.
 - next_step: the most likely next step to fix or confirm it.
+- severity: one of "critical" (pipeline down or data loss), "high" (run blocked),
+  "medium" (degraded or recoverable) or "low" (cosmetic or self-healing).
+- confidence: a number from 0 to 1 for how sure you are of this root cause,
+  given only what the log shows.
+- suggested_fix: a concrete fix as a command, config change or code patch if
+  the log supports one, otherwise an empty string. It is a suggestion for a
+  human to review, so never claim it has been applied.
 
 Order the failures by what to look at first - the one most likely to be the
 run's real blocker goes first. Downstream failures that only happened because
@@ -235,7 +242,10 @@ code fences, no commentary before or after it - matching exactly this shape:
       "failure_type": "string",
       "what_broke": "string",
       "evidence": "string",
-      "next_step": "string"
+      "next_step": "string",
+      "severity": "critical | high | medium | low",
+      "confidence": 0.0,
+      "suggested_fix": "string"
     }
   ],
   "notes": "string"
@@ -251,11 +261,32 @@ IMAGE_LOG_INSTRUCTIONS = (
 )
 
 
+SEVERITIES = ("critical", "high", "medium", "low")
+
+
 class Failure(BaseModel):
     failure_type: str
     what_broke: str
     evidence: str
     next_step: str
+    # Optional so older stored reports and terse model output still validate.
+    severity: str = "medium"
+    confidence: float = 0.5
+    suggested_fix: str = ""
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _known_severity(cls, v: object) -> str:
+        v = str(v).strip().lower()
+        return v if v in SEVERITIES else "medium"
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def _clamp_confidence(cls, v: object) -> float:
+        try:
+            return min(1.0, max(0.0, float(v)))
+        except (TypeError, ValueError):
+            return 0.5
 
 
 class Triage(BaseModel):
@@ -283,12 +314,20 @@ def _read_log_file(log_path: str) -> tuple[str, bool]:
 
     Returns (text, used_fallback_encoding).
     """
+    with open(log_path, "rb") as f:
+        raw = f.read()
+    text, fallback = decode_log_bytes(raw)
+    return text, fallback
+
+
+def decode_log_bytes(raw: bytes) -> tuple[str, bool]:
+    """Decode log bytes: UTF-16 (BOM), UTF-8, else Latin-1. Returns (text, used_fallback)."""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16"), False
     try:
-        with open(log_path, encoding="utf-8") as f:
-            return f.read(), False
+        return raw.decode("utf-8-sig"), False
     except UnicodeDecodeError:
-        with open(log_path, encoding="latin-1") as f:
-            return f.read(), True
+        return raw.decode("latin-1"), True
 
 
 def _load_image(log_path: str) -> tuple[str, bytes] | None:
@@ -316,9 +355,31 @@ def _truncate_log_text(log_text: str) -> tuple[str, bool]:
 
     head = log_text[:TRUNCATE_HEAD_CHARS]
     tail = log_text[-TRUNCATE_TAIL_CHARS:] if TRUNCATE_TAIL_CHARS else ""
-    omitted = len(log_text) - len(head) - len(tail)
+    middle = log_text[len(head):len(log_text) - len(tail)]
+    kept = _error_lines(middle, MAX_LOG_CHARS - TRUNCATE_HEAD_CHARS - TRUNCATE_TAIL_CHARS)
+    omitted = len(middle) - len(kept)
     marker = f"\n\n[... {omitted:,} characters omitted from the middle of this log ...]\n\n"
+    if kept:
+        marker = (f"\n\n[... middle of log omitted; error-like lines kept below, "
+                  f"{omitted:,} other characters dropped ...]\n{kept}\n\n")
     return head + marker + tail, True
+
+
+_ERROR_LINE = re.compile(r"error|fail|exception|fatal|traceback|denied|timeout|timed out|"
+                         r"killed|oom|panic", re.IGNORECASE)
+
+
+def _error_lines(text: str, budget: int) -> str:
+    """Error-like lines from the omitted middle of a huge log, up to `budget` chars."""
+    kept, used = [], 0
+    for line in text.splitlines():
+        if _ERROR_LINE.search(line):
+            line = line[:400]
+            if used + len(line) + 1 > budget:
+                break
+            kept.append(line)
+            used += len(line) + 1
+    return "\n".join(kept)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -801,7 +862,10 @@ def print_report(triage: Triage) -> None:
         print("-" * len(heading))
         print(f"What broke: {failure.what_broke}")
         print(f"Evidence:   {failure.evidence}")
+        print(f"Severity:   {failure.severity} (confidence {failure.confidence:.0%})")
         print(f"Next step:  {failure.next_step}")
+        if failure.suggested_fix:
+            print(f"Suggested fix (review before running): {failure.suggested_fix}")
         print()
 
     if triage.notes:

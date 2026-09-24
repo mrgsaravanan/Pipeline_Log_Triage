@@ -79,9 +79,25 @@ def classify(failure_type: str, what_broke: str) -> tuple[str, str, float]:
     return DEFAULT_RULE
 
 
-def priority_for(index: int) -> tuple[str, str]:
-    """(priority, severity): the failure triage put first is the run's blocker."""
-    return ("P1", "high") if index == 0 else ("P2", "medium")
+SEVERITY_PRIORITY = {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}
+
+
+def priority_for(index: int, severity: str | None = None) -> tuple[str, str]:
+    """(priority, severity). The failure triage put first is the run's blocker, so it
+    is never below P1; without a model-given severity the rest default to P2."""
+    if severity not in SEVERITY_PRIORITY:
+        return ("P1", "high") if index == 0 else ("P2", "medium")
+    priority = SEVERITY_PRIORITY[severity]
+    if index == 0 and priority > "P1":
+        return "P1", "high"
+    return priority, severity
+
+
+def failure_signature(failure_type: str, category: str) -> str:
+    """Stable id for 'the same failure again': the label with numbers/ids stripped."""
+    label = re.sub(r"[0-9a-f]{8,}|\d+", "#", failure_type.lower())
+    label = re.sub(r"\W+", " ", label).strip()
+    return hashlib.sha1(f"{category}|{label}".encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------- connection
@@ -116,7 +132,8 @@ def save_run(conn, log_path: str, triage, model: str = "") -> int:
 
         for i, f in enumerate(triage.failures):
             category, team_name, hours = classify(f.failure_type, f.what_broke)
-            priority, severity = priority_for(i)
+            priority, severity = priority_for(i, getattr(f, "severity", None))
+            signature = failure_signature(f.failure_type, category)
             team = teams.get(team_name)
             cost = round(float(team["hourly_rate"]) * hours, 2) if team else None
             # Naive default ETA: twice the estimate, to allow for queueing and review.
@@ -124,11 +141,13 @@ def save_run(conn, log_path: str, triage, model: str = "") -> int:
             cur.execute(
                 "INSERT INTO triage_findings (run_id, title, root_cause, evidence, "
                 "suggested_fix, category, severity, priority, assigned_team_id, status, "
-                "eta, estimated_hours, estimated_cost) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                "eta, estimated_hours, estimated_cost, confidence, signature, proposed_fix) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (run_id, f.failure_type, f.what_broke, f.evidence, f.next_step, category,
                  severity, priority, team["id"] if team else None,
-                 "assigned" if team else "new", eta, hours, cost),
+                 "assigned" if team else "new", eta, hours, cost,
+                 getattr(f, "confidence", None), signature,
+                 getattr(f, "suggested_fix", "") or None),
             )
             finding_id = cur.fetchone()["id"]
             cur.execute(
@@ -141,13 +160,37 @@ def save_run(conn, log_path: str, triage, model: str = "") -> int:
     return run_id
 
 
+_migrated = False
+
+
+def ensure_migrated(conn) -> None:
+    """Add columns introduced after the first release, once per process."""
+    global _migrated
+    if _migrated:
+        return
+    with conn.cursor() as cur:
+        cur.execute("ALTER TABLE triage_findings ADD COLUMN IF NOT EXISTS signature TEXT")
+        cur.execute("ALTER TABLE triage_findings ADD COLUMN IF NOT EXISTS proposed_fix TEXT")
+    conn.commit()
+    _migrated = True
+
+
+def run_findings(conn, run_id: int) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute(FINDING_SELECT + " WHERE f.run_id = %s ORDER BY f.id", (run_id,))
+        return cur.fetchall()
+
+
 def record_run(log_path: str, triage, model: str = "") -> None:
     """Best-effort hook called after every triage: never fails the triage itself."""
     if not db_configured():
         return
     try:
         with connect() as conn:
-            save_run(conn, log_path, triage, model)
+            ensure_migrated(conn)
+            run_id = save_run(conn, log_path, triage, model)
+            import notify
+            notify.notify_findings(log_path, run_findings(conn, run_id))
     except Exception as e:  # noqa: BLE001 - DB down / psycopg missing must not lose the report
         print(f"note: could not save triage to Postgres: {e}", file=sys.stderr)
 
@@ -280,7 +323,10 @@ FINDING_SELECT = (
     "SELECT f.id, f.run_id, r.log_file, f.title, f.root_cause, f.evidence, f.suggested_fix, "
     "f.category, f.severity, f.priority, f.assigned_team_id, t.name AS team_name, f.assignee, "
     "f.status, f.resolution_notes, f.eta, f.resolved_at, f.estimated_hours, f.actual_hours, "
-    "f.estimated_cost, f.actual_cost, f.created_at, f.updated_at "
+    "f.estimated_cost, f.actual_cost, f.created_at, f.updated_at, f.confidence, "
+    "f.proposed_fix, t.oncall_email, "
+    "(SELECT count(*) FROM triage_findings x WHERE x.signature = f.signature "
+    "AND f.signature IS NOT NULL) AS occurrences "
     "FROM triage_findings f JOIN triage_runs r ON r.id = f.run_id "
     "LEFT JOIN teams t ON t.id = f.assigned_team_id"
 )
@@ -298,6 +344,70 @@ def list_findings(conn, status=None, team_id=None, priority=None, assignee=None)
     with conn.cursor() as cur:
         cur.execute(sql, params)
         return cur.fetchall()
+
+
+def finding_markdown(f: dict) -> str:
+    """One finding as a Markdown report, e.g. to attach to a ticket."""
+    seen = int(f.get("occurrences") or 1)
+    conf = f.get("confidence")
+    lines = [
+        f"# #{f['id']} {f['title']}", "",
+        f"- Priority: {f['priority']} ({f['severity']})",
+        f"- Category: {f.get('category') or 'uncategorised'}",
+        f"- Team: {f.get('team_name') or 'unassigned'}",
+        f"- Status: {f['status']}",
+        f"- Seen: {seen} time(s)",
+    ]
+    if conf is not None:
+        lines.append(f"- Confidence: {float(conf):.0%}")
+    lines += ["", "## What broke", f.get("root_cause") or "", "",
+              "## Evidence", "```", f.get("evidence") or "", "```", "",
+              "## Next step", f.get("suggested_fix") or ""]
+    if f.get("proposed_fix"):
+        lines += ["", "## Suggested fix (AI suggestion - review before running)",
+                  "```", f["proposed_fix"], "```"]
+    if f.get("resolution_notes"):
+        lines += ["", "## Resolution notes", f["resolution_notes"]]
+    return "\n".join(lines) + "\n"
+
+
+def get_finding(conn, finding_id: int) -> dict | None:
+    with conn.cursor() as cur:
+        cur.execute(FINDING_SELECT + " WHERE f.id = %s", (finding_id,))
+        return cur.fetchone()
+
+
+def trends(conn, weeks: int = 8) -> dict:
+    """Aggregates for the dashboard: weekly volume, categories, team cost, MTTR, repeats."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT to_char(date_trunc('week', created_at), 'YYYY-MM-DD') AS week, "
+            "count(*) AS findings FROM triage_findings "
+            "WHERE created_at >= now() - make_interval(weeks => %s) GROUP BY 1 ORDER BY 1",
+            (weeks,))
+        weekly = cur.fetchall()
+        cur.execute("SELECT coalesce(category, 'other') AS category, count(*) AS findings "
+                    "FROM triage_findings GROUP BY 1 ORDER BY 2 DESC")
+        categories = cur.fetchall()
+        cur.execute(
+            "SELECT coalesce(t.name, 'unassigned') AS team, count(*) AS findings, "
+            "coalesce(sum(f.estimated_cost), 0) AS estimated_cost, "
+            "coalesce(sum(f.actual_cost), 0) AS actual_cost "
+            "FROM triage_findings f LEFT JOIN teams t ON t.id = f.assigned_team_id "
+            "GROUP BY 1 ORDER BY 3 DESC")
+        team_cost = cur.fetchall()
+        cur.execute(
+            "SELECT avg(extract(epoch FROM (resolved_at - created_at)) / 3600) AS hours "
+            "FROM triage_findings WHERE resolved_at IS NOT NULL")
+        mttr = cur.fetchone()["hours"]
+        cur.execute(
+            "SELECT max(title) AS title, count(*) AS occurrences FROM triage_findings "
+            "WHERE signature IS NOT NULL GROUP BY signature HAVING count(*) > 1 "
+            "ORDER BY 2 DESC LIMIT 5")
+        repeats = cur.fetchall()
+    return {"weekly": weekly, "categories": categories, "team_cost": team_cost,
+            "mttr_hours": round(float(mttr), 1) if mttr is not None else None,
+            "repeats": repeats}
 
 
 def list_teams(conn) -> list[dict]:

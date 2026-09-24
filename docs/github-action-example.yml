@@ -1,0 +1,29 @@
+# Example: send a failed CI job's log to Pipeline Log Triage automatically.
+# Copy to .github/workflows/ in the repo whose pipeline you want triaged, and add
+# repository secrets TRIAGE_URL (e.g. https://pipeline-log-triage-saravanan.azurewebsites.net)
+# and TRIAGE_INGEST_TOKEN (the value of TRIAGE_INGEST_TOKEN on the triage server).
+name: Triage failed builds
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+jobs:
+  triage:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the failed run's log
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run view ${{ github.event.workflow_run.id }} --repo ${{ github.repository }} --log-failed > failed.log
+      - name: Send it to triage
+        env:
+          TRIAGE_URL: ${{ secrets.TRIAGE_URL }}
+          TRIAGE_INGEST_TOKEN: ${{ secrets.TRIAGE_INGEST_TOKEN }}
+        run: |
+          jq -Rs --arg name "${{ github.repository }}#${{ github.event.workflow_run.id }}" \
+            '{name: $name, text: .}' failed.log > body.json
+          curl --fail-with-body -sS -X POST "$TRIAGE_URL/api/triage" \
+            -H "Authorization: Bearer $TRIAGE_INGEST_TOKEN" \
+            -H "Content-Type: application/json" --data @body.json

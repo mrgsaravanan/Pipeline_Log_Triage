@@ -29,6 +29,11 @@
   th, td { text-align:left; padding:.45rem .5rem; border-bottom:1px solid var(--line); }
   tbody tr { cursor:pointer; }
   tbody tr:hover, tbody tr.sel { background:var(--card); }
+  .bar { display:flex; align-items:center; gap:.5rem; font-size:.85rem; margin:.15rem 0; }
+  .bar i { display:block; height:.7rem; background:var(--accent); border-radius:3px; min-width:2px; }
+  .trends { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem; margin:1rem 0; }
+  .trends > div { background:var(--card); padding:.6rem 1rem; border-radius:6px; }
+  .fix { background:var(--card); padding:.6rem; border-radius:4px; white-space:pre-wrap; font-family:monospace; font-size:.85rem; }
   .pill { padding:.1rem .5rem; border-radius:10px; background:var(--card); border:1px solid var(--line); font-size:.8rem; }
   .P0, .P1 { color:var(--err); border-color:var(--err); }
   .detail { background:var(--card); border-radius:6px; padding:1rem; margin-top:1.5rem; }
@@ -59,6 +64,7 @@
   </header>
 
   <div class="stats" id="stats"></div>
+  <details id="trendBox"><summary>Trends and cost</summary><div class="trends" id="trends"></div></details>
 
   <div class="filters">
     <select id="fStatus"><option value="">All statuses</option></select>
@@ -70,7 +76,7 @@
   <p id="listErr" class="error"></p>
 
   <table>
-    <thead><tr><th>#</th><th>Finding</th><th>Category</th><th>Priority</th><th>Team</th>
+    <thead><tr><th>#</th><th>Finding</th><th>Category</th><th>Priority</th><th>Confidence</th><th>Seen</th><th>Team</th>
       <th>Assignee</th><th>Status</th><th>ETA</th><th>Est. cost</th></tr></thead>
     <tbody id="rows"></tbody>
   </table>
@@ -82,6 +88,12 @@
     <p><b>What broke:</b> <span id="dRoot"></span></p>
     <p><b>Evidence:</b></p><pre id="dEvidence"></pre>
     <p><b>Suggested next step:</b> <span id="dFix"></span></p>
+    <div id="dProposedBox" hidden>
+      <p><b>Suggested fix</b> <span class="muted">(an AI suggestion - review before running)</span></p>
+      <div class="fix" id="dProposed"></div>
+    </div>
+    <p><button id="exportBtn" type="button">Export as Markdown</button>
+       <button id="printBtn" type="button">Print / save as PDF</button></p>
 
     <div class="grid">
       <div><label for="eStatus">Status</label><select id="eStatus"></select></div>
@@ -178,6 +190,34 @@ async function start() {
   fill($("eTeam"), teams.map((t) => [t.id, t.name]), "(unassigned)");
   show("app");
   await load();
+  loadTrends();
+}
+
+function bars(rows, label, value, fmt = (v) => v) {
+  const max = Math.max(1, ...rows.map((r) => Number(r[value])));
+  const box = document.createElement("div");
+  if (!rows.length) box.append(el("span", "No data yet.", "muted"));
+  for (const r of rows) {
+    const row = el("div", "", "bar"), i = document.createElement("i");
+    i.style.width = Math.round(Number(r[value]) / max * 140) + "px";
+    row.append(el("span", String(r[label]).slice(0, 28)), i, el("span", fmt(r[value]), "muted"));
+    box.append(row);
+  }
+  return box;
+}
+
+async function loadTrends() {
+  try {
+    const t = await api("/api/trends");
+    const section = (title, body) => { const d = document.createElement("div"); d.append(el("b", title), body); return d; };
+    const mttr = el("p", t.mttr_hours == null ? "No resolved findings yet." : `${t.mttr_hours} hours`);
+    $("trends").replaceChildren(
+      section("Findings per week", bars(t.weekly, "week", "findings")),
+      section("By category", bars(t.categories, "category", "findings")),
+      section("Estimated cost by team", bars(t.team_cost, "team", "estimated_cost", money)),
+      section("Mean time to resolve", mttr),
+      section("Recurring failures", bars(t.repeats, "title", "occurrences", (v) => v + "x")));
+  } catch (e) { $("trends").replaceChildren(el("span", e.message, "error")); }
 }
 
 async function load() {
@@ -207,6 +247,8 @@ function render() {
     if (selected && selected.id === f.id) tr.className = "sel";
     tr.append(el("td", f.id), el("td", f.title), el("td", f.category || "-"),
       (() => { const td = el("td"); td.append(el("span", f.priority, "pill " + f.priority)); return td; })(),
+      el("td", f.confidence == null ? "-" : Math.round(Number(f.confidence) * 100) + "%"),
+      el("td", Number(f.occurrences) > 1 ? `${f.occurrences}x` : "1x"),
       el("td", f.team_name || "-"), el("td", f.assignee || "-"), el("td", f.status),
       el("td", fmtTime(f.eta)), el("td", money(f.estimated_cost)));
     tr.addEventListener("click", () => select(f));
@@ -224,6 +266,8 @@ async function select(f) {
   $("dRoot").textContent = f.root_cause || "";
   $("dEvidence").textContent = f.evidence || "";
   $("dFix").textContent = f.suggested_fix || "";
+  $("dProposedBox").hidden = !f.proposed_fix;
+  $("dProposed").textContent = f.proposed_fix || "";
   $("eStatus").value = f.status;
   $("ePriority").value = f.priority;
   $("eTeam").value = f.assigned_team_id || "";
@@ -236,6 +280,17 @@ async function select(f) {
   $("eTeam").disabled = me.role !== "lead";
   loadHistory(f.id);
 }
+
+$("exportBtn").addEventListener("click", async () => {
+  if (!selected) return;
+  const res = await fetch(BACKEND + `/api/findings/${selected.id}/export`, { credentials: "include" });
+  if (!res.ok) { $("saveErr").textContent = `export failed (${res.status})`; return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await res.blob());
+  a.download = `finding-${selected.id}.md`;
+  a.click(); URL.revokeObjectURL(a.href);
+});
+$("printBtn").addEventListener("click", () => window.print());
 
 function fillAssignees(teamId, current) {
   const team = teams.find((t) => String(t.id) === String(teamId));
