@@ -41,19 +41,25 @@
 
 <details>
   <summary>Settings</summary>
-  <label for="backend">Local server URL</label>
+  <label for="backend">Triage server URL</label>
   <input id="backend" type="text">
+  <label for="code">Access code</label>
+  <input id="code" type="password" autocomplete="off">
 </details>
 
 <script>
+const DEFAULT_BACKEND = location.protocol.startsWith("http") && location.hostname.endsWith("vercel.app")
+  ? "https://pipeline-log-triage-saravanan.azurewebsites.net" : "http://localhost:8000";
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const $ = (id) => document.getElementById(id);
 const store = {
   get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, v); } catch {} },
 };
-$("backend").value = store.get("backend", "http://localhost:8000");
+$("backend").value = store.get("backend", DEFAULT_BACKEND);
 $("backend").addEventListener("change", () => store.set("backend", $("backend").value.trim()));
+$("code").value = store.get("code", "");
+$("code").addEventListener("change", () => store.set("code", $("code").value));
 
 function el(tag, attrs = {}, text = "") {
   const e = document.createElement(tag);
@@ -121,13 +127,11 @@ $("go").addEventListener("click", async () => {
     try {
       res = await fetch(base + "/api/triage", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "X-Access-Code": $("code").value },
         body: JSON.stringify(body),
       });
     } catch {
-      throw new Error(`Could not reach the local server at ${base}.\n` +
-        "Start it with: python local_server.py\n" +
-        "and allow this site: TRIAGE_ALLOWED_ORIGINS=" + location.origin);
+      throw new Error(`Could not reach the triage server at ${base}.`);
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `Server error (${res.status})`);

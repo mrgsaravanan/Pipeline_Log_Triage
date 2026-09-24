@@ -10,14 +10,18 @@ Set TRIAGE_ACCESS_CODE to require a shared code on submit - strongly
 recommended for any public URL backed by a billed API key.
 """
 
+import base64
+import binascii
 import os
 import secrets
 import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 # Reuse Triage.py from the repo root - same pattern tests/test_triage.py uses.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -33,6 +37,19 @@ from Triage import (
 )
 
 app = FastAPI(title="Pipeline Log Triage")
+
+# The Vercel-hosted UI (web/index.html) calls /api/triage cross-origin.
+DEFAULT_ORIGINS = "https://pipeline-log-triage.vercel.app"
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        o.strip().rstrip("/")
+        for o in os.environ.get("TRIAGE_ALLOWED_ORIGINS", DEFAULT_ORIGINS).split(",")
+        if o.strip()
+    ],
+    allow_methods=["POST"],
+    allow_headers=["Content-Type", "X-Access-Code"],
+)
 
 PAGE_HEAD = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Pipeline Log Triage</title>
@@ -187,6 +204,44 @@ async def triage(
 
     body = _form_html() + f'<p class="error">{_escape(error)}</p>'
     return PAGE_HEAD + body + PAGE_TAIL
+
+
+class TriageRequest(BaseModel):
+    name: str = "(pasted text)"
+    text: str = ""
+    image_base64: str = ""
+
+
+@app.post("/api/triage")
+def api_triage(req: TriageRequest, x_access_code: str = Header(default="")) -> dict:
+    """JSON endpoint for the Vercel UI; same behavior as local_server.py."""
+    if not _access_ok(x_access_code):
+        raise HTTPException(401, "incorrect access code")
+    try:
+        if req.image_base64:
+            try:
+                raw = base64.b64decode(req.image_base64, validate=True)
+            except (binascii.Error, ValueError):
+                raise HTTPException(400, "image_base64 is not valid base64") from None
+            media_type = detect_image_media_type(raw)
+            if media_type is None:
+                raise HTTPException(400, "unsupported image; use PNG, JPEG, GIF or WebP")
+            if len(raw) > MAX_IMAGE_BYTES:
+                raise HTTPException(400, f"image is larger than {MAX_IMAGE_BYTES / 1e6:.1f} MB")
+            result = run_triage_image(req.name, raw, media_type)
+        else:
+            if not req.text.strip():
+                raise HTTPException(400, "no log content provided")
+            text, _ = _truncate_log_text(req.text)
+            result = run_triage(req.name, text)
+    except FileNotFoundError:
+        raise HTTPException(502, "claude CLI not found in this container") from None
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "claude CLI timed out") from None
+    except ClaudeCliError as e:
+        raise HTTPException(502, f"Triage failed: {e}") from e
+    _append_history(req.name, result)
+    return result.model_dump()
 
 
 @app.get("/health")
