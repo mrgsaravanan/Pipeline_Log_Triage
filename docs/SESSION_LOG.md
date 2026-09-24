@@ -63,6 +63,11 @@ browser --> Vercel (static UI in web/ + dashboard API in api/index.py)
     and could not be read back, so a new key was generated, set on Azure, and
     pasted into Vercel by the owner. Sign-in on both the dashboard and the
     triage page was confirmed working by the owner.
+12. **Slack alerts.** The owner created a Slack app with an Incoming Webhook and set
+    `TRIAGE_WEBHOOK_URL` on the Azure app. A test triage (`slack-alert-test`, an
+    out-of-memory failure rated critical) produced an alert in the channel,
+    confirmed by the owner. (A stray `invalid_payload` seen earlier came from
+    testing the webhook outside the app; Slack only accepts a JSON POST.)
 
 ## Improvements implemented
 
@@ -106,16 +111,16 @@ az webapp restart -g pipeline-log-triage-rg -n pipeline-log-triage-saravanan
 Verified: build gate clean (144 tests); Vercel deploys from `main`; Azure
 `/api/triage` returns structured results with severity, confidence and a suggested
 fix; access-code, CI-token and rate-limit paths; a triage run saved to Neon and
-visible on the dashboard; sign-in and triage working on both pages (confirmed by
-the owner).
+visible on the dashboard; sign-in and triage working on both pages and a Slack
+alert delivered (both confirmed by the owner).
 
-Not verified: alert delivery (no webhook/SMTP configured); the trends panel,
+Not verified: email alerts (no SMTP configured); the trends panel,
 Markdown export and print/PDF buttons in a browser; the GitHub Action example
 against a real repo; cold-start latency of the Azure container.
 
 ## Open items and cautions
 
-- Add `TRIAGE_WEBHOOK_URL` (or SMTP settings) on Azure to turn alerts on.
+- Slack alerts are on. Email alerts stay off until the SMTP settings are set.
 - The rate limiter is per instance and resets on restart.
 - The Azure B1 plan and registry are billed; the Claude OAuth token from
   `claude setup-token` lasts a year. Revoke it if the deployment is torn down or
