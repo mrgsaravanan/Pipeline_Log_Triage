@@ -158,13 +158,29 @@ def test_seed_creates_two_users_per_team_and_hides_hash():
 
 # ------------------------------------------------------------------ saving
 
+def test_pick_assignee_returns_first_row_or_none():
+    # The real query orders by open_count then username, so the first row is
+    # already the least-loaded member; an empty team has no assignee.
+    conn = FakeConn([[{"username": "omar.platform"}, {"username": "priya.platform"}]])
+    with conn.cursor() as cur:
+        assert triage_db.pick_assignee(cur, 1) == "omar.platform"
+
+    empty_team_conn = FakeConn([[]])
+    with empty_team_conn.cursor() as cur:
+        assert triage_db.pick_assignee(cur, 1) is None
+
+
 def test_save_run_routes_and_costs_each_failure():
     teams = [
         {"id": 1, "name": "Platform & Infrastructure", "hourly_rate": 90},
         {"id": 2, "name": "Data Engineering", "hourly_rate": 80},
         {"id": 3, "name": "Application Engineering", "hourly_rate": 85},
     ]
-    conn = FakeConn([teams, {"id": 5}, {"id": 50}, {"id": 51}])
+    conn = FakeConn([
+        teams, {"id": 5},
+        [{"username": "omar.platform"}], {"id": 50},
+        [{"username": "jonas.data"}], {"id": 51},
+    ])
     assert triage_db.save_run(conn, "logs/nightly.log", make_triage(), "m") == 5
     assert conn.commits == 1
 
@@ -173,11 +189,13 @@ def test_save_run_routes_and_costs_each_failure():
 
     first, second = (p for _, p in conn.sql("INSERT INTO triage_findings"))
     # (run_id, title, root_cause, evidence, fix, category, severity, priority, team, status,
-    #  eta, hours, cost)
+    #  eta, hours, cost, ..., assignee)
     assert first[5:10] == ("permissions", "high", "P1", 1, "assigned")
     assert first[11:13] == (2, 180.0)
+    assert first[-1] == "omar.platform"
     assert second[5:10] == ("schema_drift", "medium", "P2", 2, "assigned")
     assert second[11:13] == (6, 480.0)
+    assert second[-1] == "jonas.data"
     assert len(conn.sql("INSERT INTO finding_status_history")) == 2
 
 
@@ -196,11 +214,12 @@ def test_save_run_routes_by_the_models_category_when_given():
         {"id": 2, "name": "Data Engineering", "hourly_rate": 80},
         {"id": 3, "name": "Application Engineering", "hourly_rate": 85},
     ]
-    conn = FakeConn([teams, {"id": 9}, {"id": 90}])
+    conn = FakeConn([teams, {"id": 9}, [{"username": "meera.data"}], {"id": 90}])
     triage_db.save_run(conn, "a.log", triage)
     (_, params), = conn.sql("INSERT INTO triage_findings")
     # index 0's default "medium" severity is bumped to P1/high (the run's blocker).
     assert params[5:10] == ("schema_drift", "high", "P1", 2, "assigned")
+    assert params[-1] == "meera.data"
 
 
 def test_save_run_without_seeded_teams_leaves_findings_new():
@@ -264,9 +283,10 @@ def test_one_log_flows_from_cli_through_to_the_dashboard_db(monkeypatch, capsys,
         {"id": 2, "name": "Data Engineering", "hourly_rate": 80},
         {"id": 3, "name": "Application Engineering", "hourly_rate": 85},
     ]
-    # teams, new run id, new finding id, then run_findings()'s fetchall (empty:
-    # skips the notify step, which is exercised separately in test_improvements.py).
-    conn = FakeConn([teams, {"id": 5}, {"id": 50}, []])
+    # teams, new run id, pick_assignee's fetchall, new finding id, then
+    # run_findings()'s fetchall (empty: skips the notify step, which is
+    # exercised separately in test_improvements.py).
+    conn = FakeConn([teams, {"id": 5}, [{"username": "omar.platform"}], {"id": 50}, []])
 
     @contextlib.contextmanager
     def fake_connect():
@@ -282,6 +302,7 @@ def test_one_log_flows_from_cli_through_to_the_dashboard_db(monkeypatch, capsys,
     (_, params), = findings
     # (run_id, title, root_cause, evidence, fix, category, severity, priority, team, status, ...)
     assert params[5:10] == ("permissions", "high", "P1", 1, "assigned")
+    assert params[-1] == "omar.platform"
     assert conn.commits >= 1
 
 

@@ -332,9 +332,16 @@ runs: the CLI, tests and the Vercel/Azure builds are unaffected.
   `category`, or an off-list value. Priority is still P1/high for the first
   failure (the run's blocker, per the prompt's ordering) and P2/medium for the
   rest; cost is hours x the team's rate, and the default ETA is twice the
-  estimate. These remain placeholders a human edits in the dashboard.
-  **Not built:** having Claude also return a per-failure effort estimate,
-  rather than the fixed per-category hours.
+  estimate. Estimate/cost/ETA remain placeholders a human edits in the
+  dashboard. **Not built:** having Claude also return a per-failure effort
+  estimate, rather than the fixed per-category hours.
+- **Assignee is also auto-picked, not just the team.** `pick_assignee()`
+  assigns each new finding to whichever member of its routed team currently
+  has the fewest open (not resolved/wont_fix) findings, ties broken
+  alphabetically by username for determinism. It's still only a starting
+  point: a lead can reassign to any teammate afterward in the dashboard, and
+  reassigning to a different team clears the assignee (the old one may not
+  belong to the new team).
 - **Auth and permissions:** `POST /api/login` sets an HMAC-signed, HttpOnly,
   SameSite=Lax cookie (8h). The signing key is `TRIAGE_SECRET_KEY`, or a
   random per-process key, in which case restarting the server signs everyone

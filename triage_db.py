@@ -134,6 +134,21 @@ def connect():
     return psycopg.connect(os.environ[DB_ENV], row_factory=dict_row)
 
 
+def pick_assignee(cur, team_id: int) -> str | None:
+    """Username of the team member with the fewest open (not resolved/wont_fix)
+    findings currently assigned to them; ties broken alphabetically by username
+    for determinism. None if the team has no members."""
+    cur.execute(
+        "SELECT u.username, "
+        "COUNT(f.id) FILTER (WHERE f.status NOT IN ('resolved', 'wont_fix')) AS open_count "
+        "FROM users u LEFT JOIN triage_findings f ON f.assignee = u.username "
+        "WHERE u.team_id = %s GROUP BY u.username ORDER BY open_count ASC, u.username ASC",
+        (team_id,),
+    )
+    rows = cur.fetchall()
+    return rows[0]["username"] if rows else None
+
+
 # ---------------------------------------------------------- saving a triage
 
 def save_run(conn, log_path: str, triage, model: str = "") -> int:
@@ -161,23 +176,27 @@ def save_run(conn, log_path: str, triage, model: str = "") -> int:
             cost = round(float(team["hourly_rate"]) * hours, 2) if team else None
             # Naive default ETA: twice the estimate, to allow for queueing and review.
             eta = now + timedelta(hours=hours * 2)
+            assignee = pick_assignee(cur, team["id"]) if team else None
             cur.execute(
                 "INSERT INTO triage_findings (run_id, title, root_cause, evidence, "
                 "suggested_fix, category, severity, priority, assigned_team_id, status, "
-                "eta, estimated_hours, estimated_cost, confidence, signature, proposed_fix) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                "eta, estimated_hours, estimated_cost, confidence, signature, proposed_fix, "
+                "assignee) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
                 (run_id, f.failure_type, f.what_broke, f.evidence, f.next_step, category,
                  severity, priority, team["id"] if team else None,
                  "assigned" if team else "new", eta, hours, cost,
                  getattr(f, "confidence", None), signature,
-                 getattr(f, "suggested_fix", "") or None),
+                 getattr(f, "suggested_fix", "") or None, assignee),
             )
             finding_id = cur.fetchone()["id"]
+            note = f"classified as {category}, routed to {team_name}"
+            if assignee:
+                note += f", assigned to {assignee}"
             cur.execute(
                 "INSERT INTO finding_status_history (finding_id, from_status, to_status, "
                 "changed_by, note) VALUES (%s, NULL, %s, %s, %s)",
-                (finding_id, "assigned" if team else "new", "auto-triage",
-                 f"classified as {category}, routed to {team_name}"),
+                (finding_id, "assigned" if team else "new", "auto-triage", note),
             )
     conn.commit()
     return run_id
