@@ -43,54 +43,11 @@
 <span id="status" class="muted"></span>
 <div id="out"></div>
 
-<details>
-  <summary>Settings</summary>
-  <label for="backend">Triage server URL</label>
-  <input id="backend" type="text">
-  <label for="code">Access code (or sign in below)</label>
-  <input id="code" type="password" autocomplete="off">
-  <label for="user">Sign in with your dashboard account</label>
-  <input id="user" type="text" placeholder="username" autocomplete="username">
-  <input id="pass" type="password" placeholder="password" autocomplete="current-password">
-  <button id="signin" type="button">Sign in</button> <span id="signinMsg" class="muted"></span>
-</details>
-
 <script>
 const DEFAULT_BACKEND = location.protocol.startsWith("http") && location.hostname.endsWith("vercel.app")
   ? "https://pipeline-log-triage-saravanan.azurewebsites.net" : "http://localhost:8000";
 const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
 const $ = (id) => document.getElementById(id);
-const store = {
-  get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
-};
-$("backend").value = store.get("backend", DEFAULT_BACKEND);
-$("backend").addEventListener("change", () => store.set("backend", $("backend").value.trim()));
-$("code").value = store.get("code", "");
-$("code").addEventListener("change", () => store.set("code", $("code").value));
-
-const session = {
-  get() { try { return sessionStorage.getItem("token") || ""; } catch { return ""; } },
-  set(v) { try { v ? sessionStorage.setItem("token", v) : sessionStorage.removeItem("token"); } catch {} },
-};
-if (session.get()) $("signinMsg").textContent = "Signed in.";
-$("signin").addEventListener("click", async () => {
-  $("signinMsg").textContent = "";
-  try {
-    const res = await fetch(location.origin + "/api/login", { method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: $("user").value.trim(), password: $("pass").value }) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || !data.token) throw new Error(data.detail || `Sign-in failed (${res.status})`);
-    session.set(data.token);
-    $("pass").value = "";
-    $("signinMsg").textContent = `Signed in as ${data.full_name}.`;
-  } catch (e) { $("signinMsg").textContent = e.message; }
-});
-function authHeaders() {
-  const token = session.get();
-  return token ? { Authorization: "Bearer " + token } : { "X-Access-Code": $("code").value };
-}
 
 function reportMarkdown(t) {
   const lines = ["# Pipeline log triage", ""];
@@ -186,16 +143,15 @@ $("go").addEventListener("click", async () => {
   try {
     const body = await buildRequest();
     if (!body.image_base64 && !body.text.trim()) throw new Error("No log content provided.");
-    const base = $("backend").value.trim().replace(/\/$/, "");
     let res;
     try {
-      res = await fetch(base + "/api/triage", {
+      res = await fetch(DEFAULT_BACKEND + "/api/triage", {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
     } catch {
-      throw new Error(`Could not reach the triage server at ${base}.`);
+      throw new Error(`Could not reach the triage server at ${DEFAULT_BACKEND}.`);
     }
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `Server error (${res.status})`);
