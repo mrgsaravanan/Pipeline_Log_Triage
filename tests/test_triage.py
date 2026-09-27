@@ -237,6 +237,37 @@ def test_main_prints_formatted_report_on_success(monkeypatch, capsys, tmp_path):
     assert "What broke: A column was dropped upstream." in out
 
 
+def test_main_triages_datastage_log_with_no_failures(monkeypatch, capsys, tmp_path):
+    """DataStage-shaped log (rejected rows, job still finishes successfully) -
+    mirrors sample_datastage.log, whose rejects are a warning, not a failure."""
+    log_file = tmp_path / "datastage.log"
+    log_file.write_text(
+        "2026-09-13 09:15:02 INFO  Customer_Load: Job started\n"
+        "2026-09-13 09:15:05 INFO  Source_Customers: Read 125,430 rows\n"
+        "2026-09-13 09:15:13 WARN  Transformer_Customers: 42 rows rejected:\n"
+        "                              invalid value for column EMAIL\n"
+        "2026-09-13 09:15:20 INFO  Target_Db2: Wrote 125,388 rows\n"
+        "2026-09-13 09:15:21 INFO  Customer_Load: Job finished successfully\n"
+    )
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+
+    payload = json.dumps(
+        {
+            "failures": [],
+            "notes": "Job finished successfully; 42 rows were rejected for an "
+            "invalid EMAIL value but this did not fail the run.",
+        }
+    )
+    monkeypatch.setattr(
+        Triage.subprocess, "run", lambda *a, **k: _completed(stdout=_cli_envelope(result=payload))
+    )
+
+    assert main() == 0
+    out = capsys.readouterr().out
+    assert "distinct failures found" not in out
+    assert "rows were rejected" in out
+
+
 def test_main_strips_markdown_code_fence_from_result(monkeypatch, capsys, tmp_path):
     _write_log(tmp_path, monkeypatch)
 
