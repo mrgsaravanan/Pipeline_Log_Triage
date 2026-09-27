@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trends and cost</title>
 <style>
-  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; --accent:#1a5fd0; }
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; --accent:#2a78d6; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; --accent:#6ea8ff; }
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; --accent:#3987e5; }
   }
   body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
          max-width:1100px; margin:2rem auto; padding:0 1rem; }
@@ -20,10 +20,21 @@
   header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem; }
   .login { max-width:320px; margin:4rem auto; }
   .login input { width:100%; }
-  .bar { display:flex; align-items:center; gap:.5rem; font-size:.85rem; margin:.15rem 0; }
-  .bar i { display:block; height:.7rem; background:var(--accent); border-radius:3px; min-width:2px; }
-  .trends { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem; margin:1rem 0; }
-  .trends > div { background:var(--card); padding:.6rem 1rem; border-radius:6px; }
+  .trends { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:1rem; margin:1rem 0; }
+  .trends > div { background:var(--card); padding:.75rem 1rem 1rem; border-radius:6px; }
+  .trends h3 { margin:0 0 .6rem; font-size:.95rem; }
+  .chart-empty { color:var(--muted); font-size:.85rem; }
+  .chart svg { display:block; width:100%; height:auto; overflow:visible; }
+  .chart .bar-mark, .chart .col-mark { fill:var(--accent); }
+  .chart .bar-row:hover .bar-mark, .chart .bar-row:focus .bar-mark,
+  .chart .col-col:hover .col-mark, .chart .col-col:focus .col-mark { opacity:.75; }
+  .chart .bar-row, .chart .col-col { outline:none; cursor:default; }
+  .chart .axis-line { stroke:var(--line); stroke-width:1; shape-rendering:crispEdges; }
+  .chart .cat-label { fill:var(--fg); font-size:11px; }
+  .chart .value-label { fill:var(--muted); font-size:11px; }
+  /* Hero figure: mean time to resolve */
+  .hero { display:flex; flex-direction:column; align-items:flex-start; gap:.15rem; padding-top:.25rem; }
+  .hero b { font-size:2.4rem; font-weight:600; line-height:1; }
   [hidden] { display:none !important; }
 </style>
 </head>
@@ -52,6 +63,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const SVG_NS = "http://www.w3.org/2000/svg";
 // Same server that serves this page by default.
 const BACKEND = location.protocol.startsWith("http") ? "" : "http://localhost:8000";
 
@@ -73,11 +85,17 @@ async function api(path, opts = {}) {
   return body;
 }
 
-// textContent only: finding text comes from a model reading arbitrary logs.
+// textContent only: finding text (categories, team names, failure titles) comes
+// from a model reading arbitrary logs, so it is untrusted for innerHTML.
 function el(tag, text = "", cls = "") {
   const e = document.createElement(tag);
   e.textContent = text;
   if (cls) e.className = cls;
+  return e;
+}
+function svgEl(tag, attrs = {}) {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
   return e;
 }
 const money = (n) => n == null ? "-" : "$" + Number(n).toFixed(0);
@@ -103,16 +121,102 @@ async function start() {
   await loadTrends();
 }
 
-function bars(rows, label, value, fmt = (v) => v) {
-  const max = Math.max(1, ...rows.map((r) => Number(r[value])));
+// Horizontal ranking bar chart: one row per record, bar grows right from a
+// left baseline, value labelled at the tip (every bar - there are only a
+// handful of rows per chart, so labelling all of them is the readable choice).
+function hBarChart(rows, labelKey, valueKey, fmt = (v) => String(v)) {
   const box = document.createElement("div");
-  if (!rows.length) box.append(el("span", "No data yet.", "muted"));
-  for (const r of rows) {
-    const row = el("div", "", "bar"), i = document.createElement("i");
-    i.style.width = Math.round(Number(r[value]) / max * 140) + "px";
-    row.append(el("span", String(r[label]).slice(0, 28)), i, el("span", fmt(r[value]), "muted"));
-    box.append(row);
-  }
+  box.className = "chart";
+  if (!rows.length) { box.append(el("span", "No data yet.", "chart-empty")); return box; }
+
+  const W = 480, labelW = 132, rightPad = 56, rowH = 28, barH = 20, topPad = 4;
+  const barAreaW = W - labelW - rightPad;
+  const H = topPad * 2 + rows.length * rowH;
+  const max = Math.max(1, ...rows.map((r) => Number(r[valueKey]) || 0));
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": `Bar chart of ${valueKey} by ${labelKey}` });
+  svg.append(svgEl("line", { class: "axis-line", x1: labelW, y1: 0, x2: labelW, y2: H }));
+
+  rows.forEach((r, i) => {
+    const y = topPad + i * rowH;
+    const value = Number(r[valueKey]) || 0;
+    const w = Math.max(2, (value / max) * barAreaW);
+    const label = String(r[labelKey] ?? "");
+    const g = svgEl("g", { class: "bar-row", tabindex: "0" });
+    const barY = y + (rowH - barH) / 2;
+    g.append(svgEl("rect", {
+      class: "bar-mark", x: labelW, y: barY, width: w, height: barH, rx: 4, ry: 4,
+    }));
+    const labelText = svgEl("text", {
+      class: "cat-label", x: labelW - 8, y: y + rowH / 2, "text-anchor": "end",
+      "dominant-baseline": "middle",
+    });
+    labelText.textContent = label.length > 22 ? label.slice(0, 21) + "…" : label;
+    const valueText = svgEl("text", {
+      class: "value-label", x: labelW + w + 8, y: y + rowH / 2, "text-anchor": "start",
+      "dominant-baseline": "middle",
+    });
+    valueText.textContent = fmt(value);
+    const title = svgEl("title", {});
+    title.textContent = `${label}: ${fmt(value)}`;
+    g.append(labelText, valueText, title);
+    svg.append(g);
+  });
+  box.append(svg);
+  return box;
+}
+
+// Vertical column chart for a short weekly time series: columns grow up from
+// a shared baseline, week label below, value labelled on the cap.
+function vColChart(rows, labelKey, valueKey) {
+  const box = document.createElement("div");
+  box.className = "chart";
+  if (!rows.length) { box.append(el("span", "No data yet.", "chart-empty")); return box; }
+
+  const W = 480, H = 160, leftPad = 8, rightPad = 8, bottomPad = 22, topPad = 20;
+  const plotW = W - leftPad - rightPad, plotH = H - topPad - bottomPad;
+  const colW = Math.min(28, plotW / rows.length - 8);
+  const step = plotW / rows.length;
+  const max = Math.max(1, ...rows.map((r) => Number(r[valueKey]) || 0));
+  const baseline = H - bottomPad;
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": `Column chart of ${valueKey} by ${labelKey}` });
+  svg.append(svgEl("line", { class: "axis-line", x1: leftPad, y1: baseline, x2: W - rightPad, y2: baseline }));
+
+  rows.forEach((r, i) => {
+    const value = Number(r[valueKey]) || 0;
+    const h = Math.max(2, (value / max) * plotH);
+    const cx = leftPad + step * i + step / 2;
+    const x = cx - colW / 2;
+    const label = String(r[labelKey] ?? "");
+    const g = svgEl("g", { class: "col-col", tabindex: "0" });
+    g.append(svgEl("rect", {
+      class: "col-mark", x, y: baseline - h, width: colW, height: h, rx: 4, ry: 4,
+    }));
+    const valueText = svgEl("text", {
+      class: "value-label", x: cx, y: baseline - h - 6, "text-anchor": "middle",
+    });
+    valueText.textContent = String(value);
+    const labelText = svgEl("text", {
+      class: "cat-label", x: cx, y: baseline + 14, "text-anchor": "middle",
+    });
+    labelText.textContent = label;
+    const title = svgEl("title", {});
+    title.textContent = `Week of ${label}: ${value} finding(s)`;
+    g.append(valueText, labelText, title);
+    svg.append(g);
+  });
+  box.append(svg);
+  return box;
+}
+
+function statTile(value) {
+  const box = document.createElement("div");
+  box.className = "hero";
+  box.append(el("b", value));
+  box.append(el("span", "Mean time to resolve", "muted"));
   return box;
 }
 
@@ -120,14 +224,18 @@ async function loadTrends() {
   $("trendsErr").textContent = "";
   try {
     const t = await api("/api/trends");
-    const section = (title, body) => { const d = document.createElement("div"); d.append(el("b", title), body); return d; };
-    const mttr = el("p", t.mttr_hours == null ? "No resolved findings yet." : `${t.mttr_hours} hours`);
+    const section = (title, body) => {
+      const d = document.createElement("div");
+      d.append(el("h3", title), body);
+      return d;
+    };
     $("trends").replaceChildren(
-      section("Findings per week", bars(t.weekly, "week", "findings")),
-      section("By category", bars(t.categories, "category", "findings")),
-      section("Estimated cost by team", bars(t.team_cost, "team", "estimated_cost", money)),
-      section("Mean time to resolve", mttr),
-      section("Recurring failures", bars(t.repeats, "title", "occurrences", (v) => v + "x")));
+      section("Findings per week", vColChart(t.weekly, "week", "findings")),
+      section("By category", hBarChart(t.categories, "category", "findings")),
+      section("Estimated cost by team", hBarChart(t.team_cost, "team", "estimated_cost", money)),
+      section("Mean time to resolve",
+        statTile(t.mttr_hours == null ? "–" : `${t.mttr_hours}h`)),
+      section("Recurring failures", hBarChart(t.repeats, "title", "occurrences", (v) => v + "x")));
   } catch (e) {
     if (e.status === 401) return show("login");
     $("trendsErr").textContent = e.message;
