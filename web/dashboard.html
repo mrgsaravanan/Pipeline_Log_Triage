@@ -42,6 +42,15 @@
   .pill.P2 { color:var(--p2); border-color:var(--p2); }
   .pill.P3 { color:var(--p3); border-color:var(--p3); }
   .pill.P4 { color:var(--p4); border-color:var(--p4); }
+  th { position:relative; }
+  .colinfo summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; gap:.2rem; }
+  .colinfo summary::-webkit-details-marker { display:none; }
+  .colinfo summary::after { content:"\25be"; font-size:.65rem; color:var(--muted); }
+  .colinfo[open] summary::after { content:"\25b4"; }
+  .colinfo .info-panel { position:absolute; top:100%; left:0; z-index:5; margin-top:.3rem;
+    width:230px; max-width:60vw; background:var(--card); border:1px solid var(--line);
+    border-radius:6px; padding:.5rem .65rem; font-weight:400; font-size:.78rem;
+    line-height:1.35; white-space:normal; box-shadow:0 2px 8px rgba(0,0,0,.15); }
   .detail { background:var(--card); border-radius:6px; padding:1rem; margin-top:1.5rem; }
   .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:0 1rem; }
   .grid select, .grid input { width:100%; }
@@ -82,8 +91,7 @@
   <p id="listErr" class="error"></p>
 
   <table>
-    <thead><tr><th>#</th><th>Finding</th><th>Category</th><th>Priority</th><th>Model Confidence</th><th>Repeats</th><th>Team</th>
-      <th>Assignee</th><th>Status</th><th>ETA</th><th>Est. cost</th></tr></thead>
+    <thead><tr id="colHeaders"></tr></thead>
     <tbody id="rows"></tbody>
   </table>
   <p id="empty" class="muted" hidden>No findings yet. Triage a log with <code>DATABASE_URL</code> set.</p>
@@ -123,6 +131,28 @@
 <script>
 const STATUSES = ["new","triaged","assigned","in_progress","blocked","resolved","wont_fix"];
 const PRIORITIES = ["P0","P1","P2","P3","P4"];
+// [header label, description shown in that column's dropdown]
+const COLUMN_INFO = [
+  ["#", "The finding's unique id in the database."],
+  ["Finding", "The failure type Claude assigned to this specific root cause (its “failure_type”)."],
+  ["Category", "The routing category behind team assignment and cost - Claude's own classification "
+    + "of the failure, or a keyword-based guess for older findings that predate it."],
+  ["Priority", "P0 (critical) to P4, derived from the failure's severity. The run's first/blocker "
+    + "failure is always bumped to at least P1, even if its severity alone would rate lower."],
+  ["Model Confidence", "How sure Claude itself was that this is the real root cause (0-100%), "
+    + "based only on what the log showed. Not a data-quality or human-reviewed score."],
+  ["Repeats", "How many times this exact failure (by category + normalized failure label) has been "
+    + "triaged before, across every run - not just this one."],
+  ["Team", "The team auto-routed to own this finding, based on its category."],
+  ["Assignee", "The specific person auto-picked to work it: whoever on the routed team currently has "
+    + "the fewest open findings. A lead can reassign to any teammate afterward."],
+  ["Status", "Where this finding is in its lifecycle: new, triaged, assigned, in_progress, blocked, "
+    + "resolved or wont_fix."],
+  ["ETA", "A naive default resolution estimate - twice the estimated hours from when it was triaged. "
+    + "A placeholder a human can edit."],
+  ["Est. cost", "Estimated hours × the assigned team's hourly rate. A placeholder estimate, not "
+    + "actual tracked cost - edit estimated hours in the finding detail to correct it."],
+];
 const $ = (id) => document.getElementById(id);
 const store = {
   get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
@@ -155,6 +185,19 @@ function el(tag, text = "", cls = "") {
   e.textContent = text;
   if (cls) e.className = cls;
   return e;
+}
+function renderColumnHeaders() {
+  $("colHeaders").replaceChildren(...COLUMN_INFO.map(([label, desc]) => {
+    const th = document.createElement("th");
+    const details = document.createElement("details");
+    details.className = "colinfo";
+    const summary = document.createElement("summary");
+    summary.textContent = label;
+    const panel = el("div", desc, "info-panel");
+    details.append(summary, panel);
+    th.append(details);
+    return th;
+  }));
 }
 function fill(select, options, blank) {
   select.replaceChildren();
@@ -347,6 +390,7 @@ for (const id of ["fStatus", "fPriority", "fTeam", "fMine"]) $(id).addEventListe
 $("eTeam").addEventListener("change", () => fillAssignees($("eTeam").value, ""));
 $("saveBtn").addEventListener("click", save);
 
+renderColumnHeaders();
 (async () => {
   try { me = await api("/api/me"); await start(); }
   catch (e) { show("login"); if (e.status === 503) $("loginErr").textContent = e.message; }
