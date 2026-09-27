@@ -69,6 +69,12 @@ CATEGORY_RULES = [
 ]
 DEFAULT_RULE = ("other", "Application Engineering", 4)
 
+# category -> (team name, estimated hours), derived from the same rules so the
+# two routing paths (model-given category, keyword fallback) always agree on
+# where a category lands.
+CATEGORY_TEAMS = {category: (team, hours) for category, team, hours, _ in CATEGORY_RULES}
+CATEGORY_TEAMS[DEFAULT_RULE[0]] = (DEFAULT_RULE[1], DEFAULT_RULE[2])
+
 
 def classify(failure_type: str, what_broke: str) -> tuple[str, str, float]:
     """Rule-based (category, team name, estimated hours) for one failure."""
@@ -77,6 +83,21 @@ def classify(failure_type: str, what_broke: str) -> tuple[str, str, float]:
         if any(re.search(rf"\b{re.escape(k)}", text) for k in keywords):
             return category, team, hours
     return DEFAULT_RULE
+
+
+def route(model_category: str, failure_type: str, what_broke: str) -> tuple[str, str, float]:
+    """(category, team name, estimated hours) for one failure.
+
+    Prefers the category Claude itself assigned to the failure (a known,
+    non-empty value) over the keyword-based `classify()` guess, since the
+    model has the full failure in context rather than just a text match.
+    Falls back to `classify()` for older stored findings (no category field)
+    or an off-list value.
+    """
+    if model_category in CATEGORY_TEAMS:
+        team, hours = CATEGORY_TEAMS[model_category]
+        return model_category, team, hours
+    return classify(failure_type, what_broke)
 
 
 SEVERITY_PRIORITY = {"critical": "P0", "high": "P1", "medium": "P2", "low": "P3"}
@@ -131,7 +152,9 @@ def save_run(conn, log_path: str, triage, model: str = "") -> int:
         run_id = cur.fetchone()["id"]
 
         for i, f in enumerate(triage.failures):
-            category, team_name, hours = classify(f.failure_type, f.what_broke)
+            category, team_name, hours = route(
+                getattr(f, "category", ""), f.failure_type, f.what_broke
+            )
             priority, severity = priority_for(i, getattr(f, "severity", None))
             signature = failure_signature(f.failure_type, category)
             team = teams.get(team_name)

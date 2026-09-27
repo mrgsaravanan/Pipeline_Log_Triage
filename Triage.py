@@ -222,6 +222,18 @@ For each distinct failure, give:
 - suggested_fix: a concrete fix as a command, config change or code patch if
   the log supports one, otherwise an empty string. It is a suggestion for a
   human to review, so never claim it has been applied.
+- category: the one owning-team area this failure belongs to, so it can be
+  routed automatically. One of:
+  - "permissions" - IAM/access-denied/forbidden/credential/auth failures.
+  - "infra" - out-of-memory, disk, timeout, connection refused, network,
+    cluster/node failures.
+  - "schema_drift" - a changed/missing column, or a serialization format
+    (Avro/Protobuf/JSON) mismatch.
+  - "data_quality" - null/duplicate/constraint violations, bad encoding, or
+    corrupt/malformed records.
+  - "dependency" - a missing or version-mismatched package, module or import.
+  - "config" - a missing or invalid environment variable or parameter.
+  - "other" - none of the above clearly fits.
 
 Order the failures by what to look at first - the one most likely to be the
 run's real blocker goes first. Downstream failures that only happened because
@@ -245,7 +257,8 @@ code fences, no commentary before or after it - matching exactly this shape:
       "next_step": "string",
       "severity": "critical | high | medium | low",
       "confidence": 0.0,
-      "suggested_fix": "string"
+      "suggested_fix": "string",
+      "category": "permissions | infra | schema_drift | data_quality | dependency | config | other"
     }
   ],
   "notes": "string"
@@ -262,6 +275,11 @@ IMAGE_LOG_INSTRUCTIONS = (
 
 
 SEVERITIES = ("critical", "high", "medium", "low")
+# Keep in sync with triage_db.CATEGORY_RULES/DEFAULT_RULE - these are the
+# categories used to auto-route a finding to its owning team.
+CATEGORIES = (
+    "permissions", "infra", "schema_drift", "data_quality", "dependency", "config", "other"
+)
 
 
 class Failure(BaseModel):
@@ -273,6 +291,9 @@ class Failure(BaseModel):
     severity: str = "medium"
     confidence: float = 0.5
     suggested_fix: str = ""
+    # "" means the model didn't give one (older report, or an off-list value);
+    # triage_db falls back to keyword-based classification in that case.
+    category: str = ""
 
     @field_validator("severity", mode="before")
     @classmethod
@@ -287,6 +308,12 @@ class Failure(BaseModel):
             return min(1.0, max(0.0, float(v)))
         except (TypeError, ValueError):
             return 0.5
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _known_category(cls, v: object) -> str:
+        v = str(v).strip().lower() if v else ""
+        return v if v in CATEGORIES else ""
 
 
 class Triage(BaseModel):

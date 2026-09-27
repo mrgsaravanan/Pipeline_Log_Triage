@@ -20,6 +20,17 @@ def test_failure_defaults_and_clamping():
     assert (g.severity, g.confidence) == ("critical", 0.5)
 
 
+def test_failure_category_normalizes_case_and_rejects_off_list_values():
+    known = Triage.Failure(failure_type="t", what_broke="w", evidence="e", next_step="n",
+                            category="Permissions")
+    assert known.category == "permissions"
+    unknown = Triage.Failure(failure_type="t", what_broke="w", evidence="e", next_step="n",
+                              category="not-a-real-category")
+    assert unknown.category == ""
+    default = Triage.Failure(failure_type="t", what_broke="w", evidence="e", next_step="n")
+    assert default.category == ""
+
+
 def test_decode_log_bytes_handles_utf16_utf8_and_latin1():
     assert Triage.decode_log_bytes("héllo\n".encode("utf-16")) == ("héllo\n", False)
     assert Triage.decode_log_bytes("héllo".encode("utf-8")) == ("héllo", False)

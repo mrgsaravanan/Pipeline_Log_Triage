@@ -84,6 +84,20 @@ def test_classify_matches_word_starts_not_substrings():
     assert triage_db.classify("Bad claim", "claim rejected")[0] == "other"
 
 
+def test_route_prefers_the_models_own_category_over_keyword_guessing():
+    # Text alone would keyword-match "infra" (timeout), but the model's own
+    # category should win: it has the full failure in context.
+    category, team, hours = triage_db.route("permissions", "Job timed out", "connection timeout")
+    assert (category, team) == ("permissions", "Platform & Infrastructure")
+    assert hours == 2  # permissions' estimate, not infra's
+
+
+def test_route_falls_back_to_classify_without_a_known_category():
+    expected = ("other", "Application Engineering", 4)
+    for empty_or_unknown in ("", "not-a-real-category"):
+        assert triage_db.route(empty_or_unknown, "Bad claim", "claim rejected") == expected
+
+
 def test_every_rule_targets_a_seeded_team():
     names = {t[0] for t in triage_db.TEAMS}
     assert {r[1] for r in triage_db.CATEGORY_RULES} | {triage_db.DEFAULT_RULE[1]} <= names
@@ -165,6 +179,28 @@ def test_save_run_routes_and_costs_each_failure():
     assert second[5:10] == ("schema_drift", "medium", "P2", 2, "assigned")
     assert second[11:13] == (6, 480.0)
     assert len(conn.sql("INSERT INTO finding_status_history")) == 2
+
+
+def test_save_run_routes_by_the_models_category_when_given():
+    # Text alone would keyword-match "infra" (timeout), but a model-given
+    # category should route it instead - here to Data Engineering.
+    triage = Triage(
+        failures=[
+            Failure(failure_type="Job timed out", what_broke="connection timeout",
+                    evidence="e", next_step="n", category="schema_drift"),
+        ],
+        notes="",
+    )
+    teams = [
+        {"id": 1, "name": "Platform & Infrastructure", "hourly_rate": 90},
+        {"id": 2, "name": "Data Engineering", "hourly_rate": 80},
+        {"id": 3, "name": "Application Engineering", "hourly_rate": 85},
+    ]
+    conn = FakeConn([teams, {"id": 9}, {"id": 90}])
+    triage_db.save_run(conn, "a.log", triage)
+    (_, params), = conn.sql("INSERT INTO triage_findings")
+    # index 0's default "medium" severity is bumped to P1/high (the run's blocker).
+    assert params[5:10] == ("schema_drift", "high", "P1", 2, "assigned")
 
 
 def test_save_run_without_seeded_teams_leaves_findings_new():

@@ -323,16 +323,18 @@ runs: the CLI, tests and the Vercel/Azure builds are unaffected.
   `triage_db.record_run()`, so the CLI, `local_server.py` and the hosted
   backends all share one path. It is best-effort like the JSONL history: a
   database failure prints a stderr note and never loses the report.
-- **Routing is rule-based, not Claude-generated.** `triage_db.classify()`
-  matches keywords in `failure_type`/`what_broke` to a category and owning
-  team (`CATEGORY_RULES`, first match wins, fallback `other` ->
-  Application Engineering). Priority is P1/high for the first failure (the
-  run's blocker, per the prompt's ordering) and P2/medium for the rest.
-  Estimated hours come from the category, cost is hours x the team's rate,
-  and the default ETA is twice the estimate. These are placeholders a human
-  edits in the dashboard. **Next step, not built:** have Claude return
-  category, priority and an effort estimate per failure - that means
-  extending the `Failure` model and prompt, and updating the existing tests.
+- **Routing prefers Claude's own category, falls back to keywords.** `Failure`
+  now carries a `category` field the model assigns per failure (one of the
+  same fixed categories `CATEGORY_RULES` uses); `triage_db.route()` looks up
+  its owning team/estimated-hours directly (`CATEGORY_TEAMS`) when the model
+  gave a known category, and only falls back to keyword-matching
+  `failure_type`/`what_broke` (`classify()`) for older stored findings with no
+  `category`, or an off-list value. Priority is still P1/high for the first
+  failure (the run's blocker, per the prompt's ordering) and P2/medium for the
+  rest; cost is hours x the team's rate, and the default ETA is twice the
+  estimate. These remain placeholders a human edits in the dashboard.
+  **Not built:** having Claude also return a per-failure effort estimate,
+  rather than the fixed per-category hours.
 - **Auth and permissions:** `POST /api/login` sets an HMAC-signed, HttpOnly,
   SameSite=Lax cookie (8h). The signing key is `TRIAGE_SECRET_KEY`, or a
   random per-process key, in which case restarting the server signs everyone
