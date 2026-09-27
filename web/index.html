@@ -5,165 +5,42 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pipeline Log Triage</title>
 <style>
-  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; }
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --line:#ccc; --accent:#1a5fd0; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; }
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --line:#444; --accent:#6ea8ff; }
   }
   body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
-         max-width:800px; margin:2rem auto; padding:0 1rem; }
-  textarea, input[type=text], input[type=password] { width:100%; box-sizing:border-box; background:var(--card);
-         color:var(--fg); border:1px solid var(--line); border-radius:4px; padding:.5rem; }
-  textarea { height:220px; font-family:monospace; font-size:.9rem; }
-  label { display:block; margin-top:1rem; font-weight:600; }
-  button { padding:.5rem 1.5rem; font-size:1rem; margin-top:.75rem; cursor:pointer; }
-  .failure { border-left:3px solid var(--err); padding-left:1rem; margin:1.25rem 0; }
-  .notes { background:var(--card); padding:1rem; margin-top:1.5rem; border-radius:4px; }
-  .error { color:var(--err); white-space:pre-wrap; }
-  .muted { color:var(--muted); font-size:.85rem; }
-  details { margin-top:1.5rem; }
-  .badge { font-size:.75rem; padding:.05rem .45rem; border-radius:10px; border:1px solid var(--line); margin-left:.4rem; }
-  .fix { background:var(--card); padding:.6rem; border-radius:4px; white-space:pre-wrap; font-family:monospace; font-size:.85rem; }
-  .actions { margin-top:1rem; }
-  @media print { #themebar, #go, .actions, details, textarea, label, input { display:none !important; } }
+         max-width:720px; margin:3rem auto; padding:0 1rem; }
+  .muted { color:var(--muted); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:1rem; margin-top:1.5rem; }
+  .card { display:block; background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:1.25rem; text-decoration:none; color:var(--fg); }
+  .card:hover { border-color:var(--accent); }
+  .card h2 { margin:0 0 .4rem; font-size:1.1rem; }
+  .card p { margin:0; font-size:.85rem; color:var(--muted); }
+  [hidden] { display:none !important; }
 </style>
 </head>
 <body>
 <h1>Pipeline Log Triage</h1>
-<p class="muted"><a href="dashboard.html">Workflow dashboard</a> (sign in to assign, track and cost findings)</p>
-<p class="muted">Runs through your own Claude subscription via a server on your machine
-  (<code>python local_server.py</code>). Nothing is sent to this site's host.</p>
+<p class="muted">Break a failed pipeline run down into distinct root causes, track findings by
+  team, and see cost/trends over time.</p>
 
-<label for="text">Paste log text</label>
-<textarea id="text" placeholder="Paste a pipeline log..."></textarea>
+<div class="cards">
+  <a class="card" href="triage.html">
+    <h2>Triage</h2>
+    <p>Paste or upload a log (or a screenshot of one) and get a root-cause report.</p>
+  </a>
+  <a class="card" href="dashboard.html">
+    <h2>Dashboard</h2>
+    <p>Sign in to assign, track, and cost findings by team.</p>
+  </a>
+  <a class="card" href="trends.html">
+    <h2>Trends and cost</h2>
+    <p>Findings per week, by category, cost by team, and recurring failures.</p>
+  </a>
+</div>
 
-<label for="file">...or upload a log file / screenshot (PNG, JPEG, GIF, WebP)</label>
-<input id="file" type="file">
-
-<button id="go">Triage</button>
-<span id="status" class="muted"></span>
-<div id="out"></div>
-
-<script>
-const DEFAULT_BACKEND = location.protocol.startsWith("http") && location.hostname.endsWith("vercel.app")
-  ? "https://pipeline-log-triage-saravanan.azurewebsites.net" : "http://localhost:8000";
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
-const $ = (id) => document.getElementById(id);
-
-function reportMarkdown(t) {
-  const lines = ["# Pipeline log triage", ""];
-  t.failures.forEach((f, i) => {
-    lines.push(`## ${i + 1}. ${f.failure_type}`, "",
-      `- Severity: ${f.severity || "medium"} (confidence ${Math.round((f.confidence ?? 0.5) * 100)}%)`, "",
-      `**What broke:** ${f.what_broke}`, "", "**Evidence:**", "```", f.evidence, "```", "",
-      `**Next step:** ${f.next_step}`, "");
-    if (f.suggested_fix) lines.push("**Suggested fix (AI suggestion - review before running):**", "```", f.suggested_fix, "```", "");
-  });
-  if (t.notes) lines.push("## Notes", t.notes, "");
-  return lines.join("\n");
-}
-
-function el(tag, attrs = {}, text = "") {
-  const e = document.createElement(tag);
-  Object.assign(e, attrs);
-  e.textContent = text;   // textContent, never innerHTML: model output is untrusted
-  return e;
-}
-
-function toBase64(bytes) {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  }
-  return btoa(bin);
-}
-
-function isImage(b) {
-  return (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) ||
-         (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) ||
-         (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) ||
-         (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46);
-}
-
-async function buildRequest() {
-  const file = $("file").files[0];
-  if (!file) return { name: "(pasted text)", text: $("text").value };
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  if (isImage(bytes)) {
-    if (bytes.length > MAX_IMAGE_BYTES) throw new Error("Image is larger than 4 MB; please shrink it.");
-    return { name: file.name, image_base64: toBase64(bytes) };
-  }
-  const utf16 = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le"
-              : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : null;
-  if (!utf16 && bytes.subarray(0, 8192).includes(0)) {
-    throw new Error("That looks like a binary file. Upload a text log or a screenshot.");
-  }
-  return { name: file.name, text: new TextDecoder(utf16 || "utf-8").decode(bytes) };
-}
-
-function render(t) {
-  const out = $("out");
-  out.replaceChildren();
-  if (t.failures.length > 1) out.append(el("p", {}, `${t.failures.length} distinct failures found.`));
-  t.failures.forEach((f, i) => {
-    const box = el("div", { className: "failure" });
-    const h = el("h3", {}, t.failures.length > 1 ? `${i + 1}. ${f.failure_type}` : f.failure_type);
-    h.append(el("span", { className: "badge" },
-      `${f.severity || "medium"} - ${Math.round((f.confidence ?? 0.5) * 100)}% sure`));
-    box.append(h);
-    for (const [label, value] of [["What broke", f.what_broke], ["Evidence", f.evidence], ["Next step", f.next_step]]) {
-      const p = el("p");
-      p.append(el("strong", {}, label + ": "), document.createTextNode(value));
-      box.append(p);
-    }
-    if (f.suggested_fix) {
-      box.append(el("p", {}, "Suggested fix (an AI suggestion - review before running):"),
-                 el("div", { className: "fix" }, f.suggested_fix));
-    }
-    out.append(box);
-  });
-  if (t.notes) out.append(el("div", { className: "notes" }, "Notes: " + t.notes));
-  const actions = el("div", { className: "actions" });
-  const dl = el("button", { type: "button" }, "Download report (.md)");
-  dl.addEventListener("click", () => {
-    const a = el("a", { href: URL.createObjectURL(new Blob([reportMarkdown(t)], { type: "text/markdown" })),
-                        download: "triage-report.md" });
-    a.click(); URL.revokeObjectURL(a.href);
-  });
-  const pr = el("button", { type: "button" }, "Print / save as PDF");
-  pr.addEventListener("click", () => window.print());
-  actions.append(dl, " ", pr);
-  out.append(actions);
-}
-
-$("go").addEventListener("click", async () => {
-  const out = $("out"), status = $("status"), btn = $("go");
-  out.replaceChildren();
-  btn.disabled = true;
-  status.textContent = "Triaging...";
-  try {
-    const body = await buildRequest();
-    if (!body.image_base64 && !body.text.trim()) throw new Error("No log content provided.");
-    let res;
-    try {
-      res = await fetch(DEFAULT_BACKEND + "/api/triage", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-    } catch {
-      throw new Error(`Could not reach the triage server at ${DEFAULT_BACKEND}.`);
-    }
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || `Server error (${res.status})`);
-    render(data);
-  } catch (e) {
-    out.append(el("p", { className: "error" }, e.message));
-  } finally {
-    btn.disabled = false;
-    status.textContent = "";
-  }
-});
-</script>
 <style>
   #themebar { position:fixed; top:.5rem; right:.75rem; display:flex; gap:.4rem; align-items:center;
               font-size:.8rem; color:var(--muted); }

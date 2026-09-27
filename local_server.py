@@ -1,4 +1,4 @@
-"""Local backend for the Vercel-hosted web UI (web/index.html).
+"""Local backend for the Vercel-hosted web UI (web/triage.html).
 
 Runs on your own machine and triages through the `claude` CLI, so every request
 is billed to your Claude subscription - no API key. The UI on Vercel is just a

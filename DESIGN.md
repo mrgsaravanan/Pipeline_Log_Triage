@@ -414,5 +414,9 @@ below). Neither fixture is tracked in git - both fall under the repo's
 - **Input handling.** UTF-16 (BOM) logs decode correctly; oversized logs keep
   error-like lines from the omitted middle in addition to head and tail.
 - **Dashboard.** `/api/trends` (weekly volume, categories, cost per team, MTTR,
-  repeats) and per-finding Markdown export; the triage page can download a report
-  or print to PDF.
+  repeats), rendered on its own page (`web/trends.html`), and per-finding
+  Markdown export; the triage page can download a report or print to PDF.
+- **Site structure.** `web/index.html` is a home page linking to `triage.html`
+  (paste/upload a log), `dashboard.html` (sign in to assign/track/cost
+  findings) and `trends.html` (the charts above) - three separate pages
+  instead of one page with everything embedded.

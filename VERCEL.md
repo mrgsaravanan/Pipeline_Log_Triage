@@ -5,7 +5,8 @@ routing subscription credentials through a hosted service, and a serverless
 function has no `claude login` session). So the architecture is split:
 
 ```
-browser --loads--> Vercel (static web/index.html, no secrets, no server code)
+browser --loads--> Vercel (static web/*.html - home, triage.html, dashboard.html,
+                     trends.html - no secrets, no server code)
 browser --fetch--> http://localhost:8000/api/triage  (local_server.py on your Mac)
                         \-> `claude -p`  -> your Claude subscription
 ```

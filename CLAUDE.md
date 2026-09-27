@@ -80,10 +80,12 @@ there's no automated test coverage of the FastAPI endpoints themselves yet
 
 ## Web frontend (Vercel + local backend)
 
-`web/index.html` is a static UI deployed to Vercel (`vercel.json`). It calls
-[`local_server.py`](local_server.py), which runs on the owner's machine and
-triages via the `claude` CLI (Claude subscription, no API key). Vercel itself
-never calls Claude. See [VERCEL.md](VERCEL.md).
+`web/` is a static site deployed to Vercel (`vercel.json`): `index.html` (home),
+`triage.html` (paste/upload a log), `dashboard.html` (sign in to assign/track
+findings) and `trends.html` (weekly volume, cost, recurring failures).
+`triage.html` calls [`local_server.py`](local_server.py), which runs on the
+owner's machine and triages via the `claude` CLI (Claude subscription, no API
+key). Vercel itself never calls Claude. See [VERCEL.md](VERCEL.md).
 
 ## Working conventions for Claude Code in this repo
 

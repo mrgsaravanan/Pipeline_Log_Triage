@@ -41,7 +41,7 @@ from Triage import (
 
 app = FastAPI(title="Pipeline Log Triage")
 
-# The Vercel-hosted UI (web/index.html) calls /api/triage cross-origin.
+# The Vercel-hosted UI (web/triage.html) calls /api/triage cross-origin.
 DEFAULT_ORIGINS = "https://pipeline-log-triage.vercel.app"
 app.add_middleware(
     CORSMiddleware,

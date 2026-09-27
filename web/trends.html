@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trends and cost</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; --accent:#1a5fd0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; --accent:#6ea8ff; }
+  }
+  body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         max-width:1100px; margin:2rem auto; padding:0 1rem; }
+  input { background:var(--card); color:var(--fg); border:1px solid var(--line);
+         border-radius:4px; padding:.4rem; font:inherit; box-sizing:border-box; }
+  button { padding:.4rem 1rem; cursor:pointer; font:inherit; }
+  label { display:block; font-weight:600; margin:.6rem 0 .2rem; font-size:.85rem; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  .error { color:var(--err); white-space:pre-wrap; }
+  header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem; }
+  .login { max-width:320px; margin:4rem auto; }
+  .login input { width:100%; }
+  .bar { display:flex; align-items:center; gap:.5rem; font-size:.85rem; margin:.15rem 0; }
+  .bar i { display:block; height:.7rem; background:var(--accent); border-radius:3px; min-width:2px; }
+  .trends { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:1rem; margin:1rem 0; }
+  .trends > div { background:var(--card); padding:.6rem 1rem; border-radius:6px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+
+<section id="loginView" class="login" hidden>
+  <h1>Trends and cost</h1>
+  <label for="user">Username</label>
+  <input id="user" autocomplete="username">
+  <label for="pass">Password</label>
+  <input id="pass" type="password" autocomplete="current-password">
+  <p><button id="loginBtn">Sign in</button></p>
+  <p id="loginErr" class="error"></p>
+  <p class="muted"><a href="index.html">Home</a> &middot; <a href="dashboard.html">Workflow dashboard</a></p>
+</section>
+
+<section id="appView" hidden>
+  <header>
+    <h1>Trends and cost</h1>
+    <div><span id="who" class="muted"></span> <button id="logoutBtn">Sign out</button>
+      &nbsp;<a href="index.html">Home</a> &middot; <a href="dashboard.html">Workflow dashboard</a></div>
+  </header>
+  <p id="trendsErr" class="error"></p>
+  <div class="trends" id="trends"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// Same server that serves this page by default.
+const BACKEND = location.protocol.startsWith("http") ? "" : "http://localhost:8000";
+
+let me = null;
+
+async function api(path, opts = {}) {
+  const res = await fetch(BACKEND + path, {
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  let body = null;
+  try { body = await res.json(); } catch {}
+  if (!res.ok) {
+    const err = new Error((body && body.detail) || `request failed (${res.status})`);
+    err.status = res.status;
+    throw err;
+  }
+  return body;
+}
+
+// textContent only: finding text comes from a model reading arbitrary logs.
+function el(tag, text = "", cls = "") {
+  const e = document.createElement(tag);
+  e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+const money = (n) => n == null ? "-" : "$" + Number(n).toFixed(0);
+
+function show(view) {
+  $("loginView").hidden = view !== "login";
+  $("appView").hidden = view !== "app";
+}
+
+async function login() {
+  $("loginErr").textContent = "";
+  try {
+    me = await api("/api/login", { method: "POST",
+      body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
+    $("pass").value = "";
+    await start();
+  } catch (e) { $("loginErr").textContent = e.message; }
+}
+
+async function start() {
+  $("who").textContent = `${me.full_name} (${me.role}, ${me.team_name})`;
+  show("app");
+  await loadTrends();
+}
+
+function bars(rows, label, value, fmt = (v) => v) {
+  const max = Math.max(1, ...rows.map((r) => Number(r[value])));
+  const box = document.createElement("div");
+  if (!rows.length) box.append(el("span", "No data yet.", "muted"));
+  for (const r of rows) {
+    const row = el("div", "", "bar"), i = document.createElement("i");
+    i.style.width = Math.round(Number(r[value]) / max * 140) + "px";
+    row.append(el("span", String(r[label]).slice(0, 28)), i, el("span", fmt(r[value]), "muted"));
+    box.append(row);
+  }
+  return box;
+}
+
+async function loadTrends() {
+  $("trendsErr").textContent = "";
+  try {
+    const t = await api("/api/trends");
+    const section = (title, body) => { const d = document.createElement("div"); d.append(el("b", title), body); return d; };
+    const mttr = el("p", t.mttr_hours == null ? "No resolved findings yet." : `${t.mttr_hours} hours`);
+    $("trends").replaceChildren(
+      section("Findings per week", bars(t.weekly, "week", "findings")),
+      section("By category", bars(t.categories, "category", "findings")),
+      section("Estimated cost by team", bars(t.team_cost, "team", "estimated_cost", money)),
+      section("Mean time to resolve", mttr),
+      section("Recurring failures", bars(t.repeats, "title", "occurrences", (v) => v + "x")));
+  } catch (e) {
+    if (e.status === 401) return show("login");
+    $("trendsErr").textContent = e.message;
+  }
+}
+
+$("loginBtn").addEventListener("click", login);
+$("pass").addEventListener("keydown", (e) => { if (e.key === "Enter") login(); });
+$("logoutBtn").addEventListener("click", async () => {
+  try { await api("/api/logout", { method: "POST" }); } catch {}
+  me = null; show("login");
+});
+
+(async () => {
+  try { me = await api("/api/me"); await start(); }
+  catch (e) { show("login"); if (e.status === 503) $("loginErr").textContent = e.message; }
+})();
+</script>
+</body>
+</html>
