@@ -103,12 +103,20 @@ def test_identity_ingest_token_session_token_and_access_code(monkeypatch):
     assert azure._identity("", "Bearer garbage") is None
 
 
-def test_identity_open_only_when_nothing_configured(monkeypatch):
+def test_identity_open_unless_an_access_code_is_actually_set(monkeypatch):
     for k in ("TRIAGE_ACCESS_CODE", "TRIAGE_INGEST_TOKEN", "TRIAGE_SECRET_KEY"):
         monkeypatch.delenv(k, raising=False)
     assert azure._identity("", "") == "open"
+    # Anonymous callers without a bearer token stay open even when
+    # TRIAGE_INGEST_TOKEN/TRIAGE_SECRET_KEY are configured for other callers
+    # (CI, the dashboard) - only a configured TRIAGE_ACCESS_CODE gates them.
     monkeypatch.setenv("TRIAGE_INGEST_TOKEN", "x")
+    assert azure._identity("", "") == "open"
+    monkeypatch.setenv("TRIAGE_SECRET_KEY", "k")
+    assert azure._identity("", "") == "open"
+    monkeypatch.setenv("TRIAGE_ACCESS_CODE", "code1")
     assert azure._identity("", "") is None
+    assert azure._identity("code1", "") == "code"
 
 
 def test_rate_limit_is_per_caller_and_slides(monkeypatch):

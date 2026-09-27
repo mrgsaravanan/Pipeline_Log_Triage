@@ -37,3 +37,13 @@ def test_api_triage_rejects_wrong_access_code(monkeypatch):
 
 def test_api_triage_requires_content(monkeypatch):
     assert _client(monkeypatch).post("/api/triage", json={"text": " "}).status_code == 400
+
+
+def test_api_triage_open_even_with_secret_key_or_ingest_token_configured(monkeypatch):
+    # TRIAGE_SECRET_KEY (dashboard sessions) and TRIAGE_INGEST_TOKEN (CI) being
+    # configured must not, by themselves, lock out anonymous callers when no
+    # TRIAGE_ACCESS_CODE is set - only an actually-set access code should do that.
+    monkeypatch.setenv("TRIAGE_SECRET_KEY", "dashboard-secret")
+    monkeypatch.setenv("TRIAGE_INGEST_TOKEN", "ci-token")
+    r = _client(monkeypatch).post("/api/triage", json={"text": "ERROR boom"})
+    assert r.status_code == 200

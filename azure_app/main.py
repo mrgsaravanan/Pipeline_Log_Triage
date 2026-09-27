@@ -102,7 +102,12 @@ def _access_ok(provided: str) -> bool:
 # A caller may present, in order: the CI ingest token (Authorization: Bearer
 # <TRIAGE_INGEST_TOKEN>), a signed-in user's session token (the `token` returned
 # by /api/login, valid when TRIAGE_SECRET_KEY matches the dashboard's), or the
-# shared access code. With none of these configured the API is open, as before.
+# shared access code - each still authenticates as before. But TRIAGE_SECRET_KEY
+# is also needed for the Postgres dashboard's own login sessions and
+# TRIAGE_INGEST_TOKEN only matters to CI callers, so neither being *configured*
+# should by itself force anonymous requests to authenticate: only an actually
+# set TRIAGE_ACCESS_CODE gates them. With no access code configured, the API is
+# open to anonymous callers too, same as the plain HTML form.
 
 RATE_LIMIT_PER_MINUTE = int(os.environ.get("TRIAGE_RATE_LIMIT", "10"))
 _hits: dict[str, deque] = defaultdict(deque)
@@ -128,7 +133,7 @@ def _identity(access_code: str, authorization: str) -> str | None:
             return f"user:{user_id}"
     if _expected_access_code():
         return "code" if _access_ok(access_code) else None
-    return None if (ingest or os.environ.get("TRIAGE_SECRET_KEY")) else "open"
+    return "open"
 
 
 def _rate_limited(identity: str, now: float | None = None) -> bool:
