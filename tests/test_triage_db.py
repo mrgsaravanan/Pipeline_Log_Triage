@@ -3,8 +3,14 @@
 No real Postgres: FakeConn records every statement and replays scripted rows.
 """
 
+import contextlib
+import json
+import subprocess
+import sys
+
 import pytest
 
+import Triage as triage_cli
 import triage_db
 from Triage import Failure, Triage
 
@@ -184,6 +190,63 @@ def test_record_run_swallows_db_errors(monkeypatch, capsys):
     monkeypatch.setattr(triage_db, "connect", boom)
     triage_db.record_run("a.log", make_triage())
     assert "could not save triage to Postgres: db down" in capsys.readouterr().err
+
+
+def test_one_log_flows_from_cli_through_to_the_dashboard_db(monkeypatch, capsys, tmp_path):
+    """End-to-end for one log, with no real `claude` CLI call and no real Postgres:
+    Triage.main() -> history append -> triage_db.record_run() -> save_run(), landing
+    a classified, costed, team-routed finding - the same path the dashboard reads."""
+    log_file = tmp_path / "s3.log"
+    log_file.write_text("2026-09-13 ERROR Uploader: AccessDenied writing to s3://reports/out")
+    monkeypatch.setattr(sys, "argv", ["Triage.py", str(log_file)])
+    monkeypatch.setattr(triage_cli, "HISTORY_FILE", str(tmp_path / "history.jsonl"))
+
+    payload = json.dumps(
+        {
+            "failures": [
+                {
+                    "failure_type": "S3 permission denied",
+                    "what_broke": "The writer role lost s3:PutObject on the reports bucket.",
+                    "evidence": "AccessDenied writing to s3://reports/out",
+                    "next_step": "Re-attach the s3:PutObject policy to the writer role.",
+                }
+            ],
+            "notes": "",
+        }
+    )
+    envelope = json.dumps({"type": "result", "is_error": False, "result": payload})
+    monkeypatch.setattr(
+        triage_cli.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(args=["claude"], returncode=0, stdout=envelope),
+    )
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    monkeypatch.setattr(triage_db, "_migrated", False)
+    teams = [
+        {"id": 1, "name": "Platform & Infrastructure", "hourly_rate": 90},
+        {"id": 2, "name": "Data Engineering", "hourly_rate": 80},
+        {"id": 3, "name": "Application Engineering", "hourly_rate": 85},
+    ]
+    # teams, new run id, new finding id, then run_findings()'s fetchall (empty:
+    # skips the notify step, which is exercised separately in test_improvements.py).
+    conn = FakeConn([teams, {"id": 5}, {"id": 50}, []])
+
+    @contextlib.contextmanager
+    def fake_connect():
+        yield conn
+
+    monkeypatch.setattr(triage_db, "connect", fake_connect)
+
+    assert triage_cli.main() == 0
+    assert "S3 permission denied" in capsys.readouterr().out
+
+    findings = conn.sql("INSERT INTO triage_findings")
+    assert len(findings) == 1
+    (_, params), = findings
+    # (run_id, title, root_cause, evidence, fix, category, severity, priority, team, status, ...)
+    assert params[5:10] == ("permissions", "high", "P1", 1, "assigned")
+    assert conn.commits >= 1
 
 
 # ----------------------------------------------------------- workflow edits
