@@ -503,6 +503,22 @@ def public_stats(conn) -> dict:
     }
 
 
+def public_users(conn) -> list[dict]:
+    """Team -> users for the public About page: names, usernames and roles only.
+
+    Never the password hash, on-call email or hourly rate.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, name FROM teams ORDER BY id")
+        teams = cur.fetchall()
+        cur.execute("SELECT username, full_name, role, team_id FROM users ORDER BY id")
+        users = cur.fetchall()
+    return [{"team": t["name"],
+             "users": [{"username": u["username"], "full_name": u["full_name"],
+                        "role": u["role"]} for u in users if u["team_id"] == t["id"]]}
+            for t in teams]
+
+
 def list_teams(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute("SELECT id, name, oncall_email, hourly_rate FROM teams ORDER BY id")

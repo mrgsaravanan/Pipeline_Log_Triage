@@ -69,6 +69,14 @@ def public_stats() -> dict:
         return triage_db.public_stats(conn)
 
 
+@router.get("/public-users")
+def public_users() -> list[dict]:
+    """No login required: who the dashboard users are (name, username, role, team) for
+    the public About page - never passwords/hashes, emails or rates."""
+    with _db() as conn:
+        return triage_db.public_users(conn)
+
+
 @router.post("/login")
 def login(req: LoginRequest, response: Response) -> dict:
     with _db() as conn:

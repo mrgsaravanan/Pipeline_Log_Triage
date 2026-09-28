@@ -91,7 +91,7 @@ there's no automated test coverage of the FastAPI endpoints themselves yet
 `web/` is a static site deployed to Vercel (`vercel.json`): `index.html` (home),
 `triage.html` (paste/upload a log), `dashboard.html` (sign in to assign/track
 findings), `trends.html` (weekly volume, cost, recurring failures) and
-`about.html` (model/RAG/software/hardware, public - pulls aggregate-only
+`about.html` (model/RAG/software/hardware and the dashboard user list - names, usernames, roles, never passwords - public; pulls aggregate-only
 figures from `GET /api/public-stats`, the one workflow route that skips login).
 `triage.html` calls [`local_server.py`](local_server.py), which runs on the
 owner's machine and triages via the `claude` CLI (Claude subscription, no API

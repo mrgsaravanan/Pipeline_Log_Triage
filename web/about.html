@@ -101,5 +101,40 @@
     no API key, nothing billed to a hosted account.</li>
 </ul>
 
+<h2>Dashboard users</h2>
+<p>Sign in at <a href="dashboard.html">the dashboard</a> with one of these usernames.
+Passwords are never shown here: they are salted scrypt hashes in the database. The
+first-time password is printed once by <code>python seed_db.py</code>; to get or reset
+one, ask the administrator (the repo owner).</p>
+<div id="users"><p>Loading users...</p></div>
+
+<script>
+(function () {
+  var box = document.getElementById("users");
+  function el(tag, text) { var e = document.createElement(tag); e.textContent = text; return e; }
+  fetch("/api/public-users").then(function (r) {
+    if (!r.ok) throw new Error(r.status);
+    return r.json();
+  }).then(function (teams) {
+    box.textContent = "";
+    teams.forEach(function (t) {
+      box.appendChild(el("h3", t.team));
+      var ul = document.createElement("ul");
+      t.users.forEach(function (u) {
+        var li = document.createElement("li");
+        li.appendChild(el("b", u.full_name));
+        li.appendChild(document.createTextNode(" - "));
+        li.appendChild(el("code", u.username));
+        li.appendChild(document.createTextNode(" (" + u.role + ")"));
+        ul.appendChild(li);
+      });
+      box.appendChild(ul);
+    });
+  }).catch(function () {
+    box.textContent = "User list unavailable right now.";
+  });
+})();
+</script>
+
 </body>
 </html>
