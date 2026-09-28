@@ -23,6 +23,7 @@ import argparse
 import hmac
 import json
 import os
+import ssl
 import subprocess
 import sys
 import urllib.request
@@ -36,6 +37,16 @@ MGMT = "https://management.azure.com"
 
 class AdfError(Exception):
     pass
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Default context, using certifi's CA bundle when present (python.org macOS builds
+    ship no system CAs, which breaks HTTPS with CERTIFICATE_VERIFY_FAILED)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
 
 
 def _factory_base() -> str:
@@ -79,7 +90,7 @@ def _post(url: str, body: dict) -> dict:
         url, data=json.dumps(body).encode(), method="POST",
         headers={"Authorization": f"Bearer {_token()}", "Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 - fixed https host
+        with urllib.request.urlopen(req, timeout=30, context=_ssl_context()) as resp:  # noqa: S310 - fixed https host
             return json.load(resp)
     except OSError as e:
         raise AdfError(f"ADF request failed: {e}") from e
