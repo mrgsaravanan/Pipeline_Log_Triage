@@ -116,6 +116,7 @@ def test_drain_queue_triages_and_marks_done(monkeypatch):
             return False
 
     done, seen = [], []
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
     monkeypatch.setattr(triage_db, "connect", lambda: Conn())
     monkeypatch.setattr(triage_db, "ensure_migrated", lambda c: None)
     monkeypatch.setattr(triage_db, "pending_adf_events", lambda c: [
@@ -123,3 +124,8 @@ def test_drain_queue_triages_and_marks_done(monkeypatch):
     monkeypatch.setattr(triage_db, "mark_adf_event_done", lambda c, i: done.append(i))
     monkeypatch.setattr(adf, "triage_webhook", lambda *a: seen.append(a))
     assert adf.drain_queue() == ["r1"] and done == [7] and seen == [("P", "r1", "m", "E")]
+
+
+def test_drain_queue_requires_database_url(monkeypatch):
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert adf.main(["--drain"]) == 2
