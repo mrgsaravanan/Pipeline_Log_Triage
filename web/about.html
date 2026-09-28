@@ -15,7 +15,8 @@
   h2 { margin:2rem 0 .5rem; font-size:1.15rem; border-bottom:1px solid var(--line); padding-bottom:.3rem; }
   .muted { color:var(--muted); font-size:.85rem; }
   code { background:var(--card); padding:.1rem .3rem; border-radius:3px; font-size:.9em; }
-  ul { padding-left:1.3rem; }
+  h3 { margin:1.1rem 0 .3rem; font-size:1rem; }
+  ul, ol { padding-left:1.3rem; }
   li { margin:.3rem 0; }
   .limits { background:var(--card); border-radius:6px; padding:.1rem 1rem; }
   [hidden] { display:none !important; }
@@ -25,6 +26,77 @@
 <h1>About this dashboard</h1>
 <p class="muted"><a href="index.html">Home</a> &middot; <a href="triage.html">Triage a log</a>
   &middot; <a href="dashboard.html">Workflow dashboard</a> &middot; <a href="trends.html">Trends and cost</a></p>
+
+<h2>How to use it</h2>
+<h3>1. Triage a log</h3>
+<ol>
+  <li>Open <a href="triage.html">Triage a log</a>.</li>
+  <li>Paste the failed run's log, or upload a log file or a screenshot of one (PNG, JPEG,
+    GIF, WebP; images up to 4 MB). Very large logs are cut to a head+tail excerpt.</li>
+  <li>Click <b>Triage</b>. On a hosted page it calls the Azure server; when running
+    locally it calls <code>python local_server.py</code> on port 8000, which must be
+    started first and needs <code>claude login</code>.</li>
+  <li>Read the report: one card per distinct failure with what broke, the quoted
+    evidence, the next step, severity and confidence. Export it as Markdown if needed.</li>
+</ol>
+<h3>2. Work the findings</h3>
+<ol>
+  <li>Sign in at the <a href="dashboard.html">Workflow dashboard</a> with a username from
+    the list at the bottom of this page.</li>
+  <li>Each failure is already classified, given a priority, routed to one of three teams
+    and assigned to the member with the fewest open findings.</li>
+  <li>Filter by status, priority or team (or tick <b>Assigned to me</b>) and click any
+    column to sort. Open a finding to change status, priority, team, assignee, ETA and
+    estimated/actual hours, and to write resolution notes.</li>
+  <li>Use <b>Export as Markdown</b> or <b>Print / save as PDF</b> to share a finding.</li>
+  <li>Open <a href="trends.html">Trends and cost</a> for weekly volume, cost and
+    recurring failures.</li>
+</ol>
+<h3>3. Let failures arrive automatically</h3>
+<p>Azure Data Factory pipelines and CI jobs can send failures in without anyone pasting
+  a log - see the integrations below.</p>
+
+<h2>Integrations</h2>
+<ul>
+  <li><b>Azure Data Factory.</b> Failed pipeline runs are pulled from the factory
+    (<code>python adf.py</code>) or pushed by a Web activity on the pipeline's Failure path
+    to <code>/api/adf/webhook</code>. On Vercel the webhook queues the failure in Postgres
+    and <code>python adf.py --drain</code> triages the queue on the owner's machine.</li>
+  <li><b>Claude</b> through the <code>claude</code> CLI (the owner's subscription) for
+    triage, with the Anthropic API used only on Vercel.</li>
+  <li><b>Postgres (Neon).</b> Every run and finding, its status history and cost live in
+    one database shared by the Azure app, the Vercel dashboard API and the local server.</li>
+  <li><b>Vercel</b> hosts this site and the dashboard's login/findings API;
+    <b>Azure App Service</b> hosts the always-on triage form and JSON API.</li>
+  <li><b>CI / GitHub Actions.</b> Any job can post a failed log to <code>/api/triage</code>
+    with an ingest token (example workflow in <code>docs/github-action-example.yml</code>).</li>
+  <li><b>Slack / Teams and email alerts.</b> Urgent (P0/P1) or recurring findings post to an
+    incoming webhook and email the owning team's on-call address.</li>
+  <li><b>Log sources.</b> Plain text, JSON-lines, stack traces, IBM DataStage logs,
+    multi-failure logs, non-UTF-8 text and screenshots.</li>
+  <li><b>Local vector search (optional).</b> The RAG pipeline below adds similar past
+    cases as background context.</li>
+</ul>
+
+<h2>Key advantages</h2>
+<ul>
+  <li><b>Root causes, not a wall of text.</b> A failed run is split into its distinct
+    failures, each with evidence quoted straight from the log so it can be checked.</li>
+  <li><b>Straight to the right people.</b> Auto-classification, priority, team routing and
+    least-loaded assignment remove the manual triage meeting.</li>
+  <li><b>One place to track it.</b> Status, ETA, hours and resolution notes per finding,
+    with a full status history for audit.</li>
+  <li><b>Cost and trends visible.</b> Estimated cost per finding from each team's hourly
+    rate, weekly volume, and mean time to resolve.</li>
+  <li><b>Repeats stand out.</b> Recurring failures are detected by signature and escalated
+    in alerts instead of being fixed once and forgotten.</li>
+  <li><b>No pay-per-token bill for normal use.</b> Triage runs on the owner's Claude
+    subscription; the dashboard itself never needs a Claude API key.</li>
+  <li><b>Works with what you have.</b> Paste, upload, screenshot, CI or Azure Data
+    Factory - no agent to install on your pipelines.</li>
+  <li><b>Safe by default.</b> Signed session cookies, salted password hashes, no passwords
+    on the public page, and only aggregate figures shown without login.</li>
+</ul>
 
 <h2>Model</h2>
 <p>Every triage is a single request to <code>claude-haiku-4-5</code>. There is no
