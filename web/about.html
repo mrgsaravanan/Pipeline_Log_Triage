@@ -63,7 +63,7 @@
     to <code>/api/adf/webhook</code>. On Vercel the webhook queues the failure in Postgres
     and <code>python adf.py --drain</code> triages the queue on the owner's machine.</li>
   <li><b>Claude</b> through the <code>claude</code> CLI (the owner's subscription) for
-    triage, with the Anthropic API used only on Vercel.</li>
+    triage - no billed API key.</li>
   <li><b>Postgres (Neon).</b> Every run and finding, its status history and cost live in
     one database shared by the Azure app, the Vercel dashboard API and the local server.</li>
   <li><b>Vercel</b> hosts this site and the dashboard's login/findings API;
@@ -102,11 +102,17 @@
 <p>Every triage is a single request to <code>claude-haiku-4-5</code>. There is no
   conversation and no tool use - one log in, one structured report out.</p>
 <ul>
-  <li><b>Local CLI backend (default).</b> Runs <code>claude -p</code> as a subprocess,
-    billed against your own Claude subscription rather than a metered API key.</li>
-  <li><b>Hosted API backend.</b> Used automatically on Vercel (a serverless function
-    can't hold an interactive <code>claude login</code> session) via the
-    <code>anthropic</code> SDK, billed to a configured <code>ANTHROPIC_API_KEY</code>.</li>
+  <li><b>Claude CLI backend (what every deployment uses).</b> Runs <code>claude -p</code>
+    as a subprocess, billed against the owner's Claude subscription rather than a
+    metered API key. It powers the local server and the Azure container, which is
+    given a Claude login token at startup.</li>
+  <li><b>Vercel never calls Claude.</b> The Vercel site is static pages plus a
+    dashboard API that only reads and writes Postgres. A serverless function can't hold a
+    <code>claude login</code> session, so triage runs on the owner's machine or the Azure
+    container and its results are saved to the shared database.</li>
+  <li><b>Optional API backend (off by default).</b> The code can call the Anthropic API
+    through the <code>anthropic</code> SDK when <code>TRIAGE_BACKEND=api</code> is set. No
+    deployment turns it on, so no <code>ANTHROPIC_API_KEY</code> is needed or billed.</li>
   <li><b>Screenshot triage.</b> The same prompt and model, given the image directly
     (vision) instead of raw log text.</li>
 </ul>
