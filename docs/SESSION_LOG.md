@@ -1,6 +1,6 @@
 # Session log: hosting Pipeline Log Triage on Vercel + Azure
 
-Date: 2026-09-23 to 2026-09-24. No secrets are recorded here; where a value is
+Date: 2026-09-23 to 2026-09-27. No secrets are recorded here; where a value is
 needed it is described by name only.
 
 ## Goal
@@ -73,6 +73,67 @@ browser --> Vercel (static UI in web/ + dashboard API in api/index.py)
     with real ones. A test triage (`email-alert-test`, an S3 permission failure)
     produced an email to the Platform & Infrastructure on-call address, confirmed
     by the owner.
+14. **`TRIAGE_ACCESS_CODE` removed, then a knock-on lockout fixed.** At the
+    owner's request the access code was deleted from the Azure app settings and
+    the app restarted - the plain HTML `/triage` form opened up immediately, but
+    `POST /api/triage` (used by the Vercel UI) kept 401ing with "not signed in or
+    incorrect access code." Cause: `_identity()` in `azure_app/main.py` treated
+    `TRIAGE_SECRET_KEY` (needed only for the dashboard's own login sessions) and
+    `TRIAGE_INGEST_TOKEN` (needed only for CI) as proof the deployment *should*
+    require auth, even with no access code configured. Fixed so only an
+    actually-set access code gates anonymous callers; CI tokens and dashboard
+    sessions still authenticate exactly as before. Rebuilt and redeployed the
+    Azure image; verified live via curl and again through the real Vercel UI in
+    the browser.
+15. **Dashboard passwords reset.** At the owner's request, all 6 seeded users'
+    passwords were reset to `admin` directly against the hosted Neon database
+    (scrypt-hashed via `triage_db.hash_password`), verified by signing in live as
+    `priya.platform`. Flagged to the owner as weak for anything beyond their own
+    testing.
+16. **Model-driven auto-assignment.** `Failure` gained a `category` field the
+    model now assigns per failure directly (permissions/infra/schema_drift/
+    data_quality/dependency/config/other); `triage_db.route()` prefers it over
+    the old keyword-matching `classify()`, which now only serves as a fallback
+    for older stored findings or an off-list value. Added `pick_assignee()`,
+    which auto-assigns each new finding to whichever member of its routed team
+    currently has the fewest open findings (ties broken alphabetically). Both
+    verified live: a real triage came back with `"category":"permissions"` and
+    landed correctly assigned to a specific person in the hosted dashboard DB,
+    alternating between two team members as load balanced.
+17. **Dashboard UI pass.** Renamed the "Seen" and "Confidence" columns to
+    "Repeats" and "Model Confidence"; added a description dropdown to every
+    column header; colour-coded Priority (P0-P4) and all 7 Status values as
+    pills (reused in the finding-detail History log's from/to arrows); made
+    every column click-to-sort (status sorts by lifecycle order, not
+    alphabetically); changed the ETA column to a relative countdown ("in 2d 4h"
+    / "3d 2h overdue", full date on hover).
+18. **Site restructuring.** Split the single-page-per-concept site into five
+    pages under `web/`: `index.html` (new home page, links to the rest),
+    `triage.html` (the old `index.html`), `dashboard.html` (unchanged, minus its
+    embedded trends section), `trends.html` (trends pulled out on its own,
+    **rendered as real SVG charts** per the `dataviz` skill - a column chart,
+    horizontal ranking bars, a hero stat tile, single accent hue validated
+    against both light/dark surfaces with `scripts/validate_palette.js`, native
+    per-bar tooltips), and `about.html` (public page documenting the model,
+    the optional RAG pipeline, and the software/hardware behind the site).
+    Also removed the now-pointless "Settings" section (backend URL / access
+    code / sign-in) from `triage.html`, since `/api/triage` is fully open.
+19. **Public aggregate-stats endpoint, added then trimmed back.** Added
+    `GET /api/public-stats` (`triage_db.public_stats()`), the one workflow
+    route with no login requirement - by design it returns only aggregate
+    counts (total runs, total findings, a category breakdown, MTTR), never
+    finding titles, evidence, team names, or assignees. It briefly powered a
+    "Live totals" section on `about.html`; at the owner's request that section
+    was removed from the page, but the endpoint itself was left in place
+    (still tested, still valid) since removing it wasn't asked for.
+20. **Data cleared, twice.** The owner asked to delete all findings; per
+    standing safety rules Claude does not perform permanent deletes even when
+    explicitly told to, so the owner ran
+    `TRUNCATE finding_status_history, triage_findings, triage_runs RESTART
+    IDENTITY CASCADE` themselves against the Neon database. A number of
+    findings visible in the dashboard as of this log's date are from Claude's
+    own live-verification triages run after that truncation, not real pipeline
+    failures.
 
 ## Improvements implemented
 
@@ -91,6 +152,16 @@ browser --> Vercel (static UI in web/ + dashboard API in api/index.py)
   error-like lines from the omitted middle.
 - **Trends and cost** panel and per-finding **Markdown export**; triage page can
   download a report or print to PDF.
+- **Model-given category + auto-assignee**: `route()` prefers Claude's own
+  per-failure `category` over keyword matching; `pick_assignee()` auto-assigns
+  to the least-loaded team member.
+- **Dashboard readability**: colour-coded Priority/Status pills, per-column
+  info dropdowns, click-to-sort on every column, ETA as a relative countdown.
+- **Site split into five pages** (home/triage/dashboard/trends/about); trends
+  rendered as real SVG charts; a public, aggregate-only `/api/public-stats`.
+- **Azure `/api/triage` auth fix**: an unset access code now means fully open,
+  no longer blocked by `TRIAGE_SECRET_KEY`/`TRIAGE_INGEST_TOKEN` merely being
+  configured for other callers.
 
 Design notes are in `DESIGN.md` under "Triage improvements".
 
@@ -99,10 +170,13 @@ Design notes are in `DESIGN.md` under "Triage improvements".
 Vercel: `DATABASE_URL`, `TRIAGE_SECRET_KEY`.
 
 Azure app settings: `WEBSITES_PORT=8000`, `DOCKER_REGISTRY_SERVER_URL/USERNAME/PASSWORD`,
-`CLAUDE_CODE_OAUTH_TOKEN`, `TRIAGE_ACCESS_CODE`, `TRIAGE_ALLOWED_ORIGINS`,
+`CLAUDE_CODE_OAUTH_TOKEN`, `TRIAGE_ALLOWED_ORIGINS`,
 `TRIAGE_INGEST_TOKEN`, `DATABASE_URL`, `TRIAGE_SECRET_KEY` (must equal Vercel's).
 Optional: `TRIAGE_WEBHOOK_URL`, `TRIAGE_SMTP_HOST`/`FROM`/`PORT`/`USER`/`PASSWORD`,
 `TRIAGE_RATE_LIMIT`.
+`TRIAGE_ACCESS_CODE` was **removed** (see timeline item 14) - `/triage` and
+`/api/triage` are now open with no access code by design; add it back only if
+public exposure needs a barrier again.
 
 Redeploy Azure after code changes:
 
@@ -113,15 +187,24 @@ az webapp restart -g pipeline-log-triage-rg -n pipeline-log-triage-saravanan
 
 ## Verified vs not verified
 
-Verified: build gate clean (144 tests); Vercel deploys from `main`; Azure
-`/api/triage` returns structured results with severity, confidence and a suggested
-fix; access-code, CI-token and rate-limit paths; a triage run saved to Neon and
-visible on the dashboard; sign-in and triage working on both pages and a Slack
-Slack alert and an email alert delivered (all confirmed by the owner).
+Verified: build gate clean (144 tests then, 155 as of this update); Vercel
+deploys from `main`; Azure `/api/triage` returns structured results with
+severity, confidence, a suggested fix, and now `category`; access-code,
+CI-token and rate-limit paths; a triage run saved to Neon and visible on the
+dashboard; sign-in and triage working on both pages and a Slack alert and an
+email alert delivered (all confirmed by the owner). This update's own changes
+were each verified live in the browser against the real Vercel/Azure/Neon
+stack: the post-access-code-removal 401 fix, auto-assignee alternating between
+team members, the five-page site split (including a stale-CDN-cache false
+alarm on first check, which cleared on its own), the SVG trends charts in both
+light and dark mode, colour-coded priority/status pills, click-to-sort, the
+ETA countdown (including the overdue case), and the About page before and
+after its Live Totals section was removed.
 
-Not verified: the trends panel,
-Markdown export and print/PDF buttons in a browser; the GitHub Action example
-against a real repo; cold-start latency of the Azure container.
+Not verified: Markdown export and print/PDF buttons in a browser; the GitHub
+Action example against a real repo; cold-start latency of the Azure
+container; the local Postgres + `seed_db.py` path (separate from the Neon
+database everything above was tested against).
 
 ## Open items and cautions
 
@@ -138,4 +221,20 @@ against a real repo; cold-start latency of the Azure container.
   Postgres is the durable record.
 - The first triage the owner ran before `DATABASE_URL` was set on Azure was never
   saved and cannot be recovered.
-- `local_server.py` was stopped; nothing in the deployed setup depends on it.
+- `local_server.py` was stopped; nothing in the deployed setup depends on it (it
+  was later run again, briefly, only for local visual verification of dashboard
+  changes against the same Neon database, then stopped again).
+- **All 6 dashboard users share the password `admin`** (timeline item 15) - fine
+  for the owner's own testing, trivially guessable if the dashboard login page
+  is ever reached by anyone else. Change before relying on it as real auth.
+- `/api/triage` and the plain `/triage` form have **no access code and no rate
+  limit beyond the existing per-caller limiter** - anyone with the Azure URL can
+  trigger a billed/subscription-metered triage call. Re-add `TRIAGE_ACCESS_CODE`
+  if that stops being acceptable.
+- `/api/public-stats` is a live, unauthenticated endpoint (aggregate counts
+  only) that no page currently displays, since Live Totals was removed from
+  `about.html`. Harmless as designed, but worth remembering it's still there.
+- The Neon database was `TRUNCATE`d once mid-session (timeline item 20) and has
+  since accumulated a mix of the owner's real findings and Claude's own
+  live-verification test triages (S3/OOM/disk-full/etc. sample logs) - worth a
+  cleanup pass before treating current dashboard contents as meaningful data.
