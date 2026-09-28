@@ -65,7 +65,7 @@
     (<code>python adf.py</code>) or pushed by a Web activity on the pipeline's Failure path
     to <code>/api/adf/webhook</code>. On Vercel the webhook queues the failure in Postgres
     and the queue is then triaged with <code>python adf.py --drain</code> on the owner's
-    machine <b>or with the dashboard's <b>Run ADF drain</b> button</b>: signed-in users see
+    machine, or with the dashboard's <b>Run ADF drain</b> button: signed-in users see
     how many ADF failures are queued, and one click starts triage in the background on the
     Azure server (which holds the Claude login). The page shows progress and refreshes the
     findings when the queue is empty.</li>
