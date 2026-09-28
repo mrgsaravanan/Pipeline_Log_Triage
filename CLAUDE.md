@@ -64,6 +64,14 @@ exercises `main()`'s CLI-invocation path monkeypatches `subprocess.run`, so
 the whole suite is free and deterministic. "Clean" means this script exits
 0.
 
+## Azure Data Factory integration
+
+[`adf.py`](adf.py) triages failed ADF pipeline runs: `python adf.py --hours 24` polls the
+factory, `python adf.py --drain` triages failures that the Vercel webhook
+(`POST /api/adf/webhook`) queued in Postgres. Both run locally through the `claude` CLI and
+need `ADF_SUBSCRIPTION_ID`/`ADF_RESOURCE_GROUP`/`ADF_FACTORY_NAME` (and `DATABASE_URL` for
+`--drain`). Full setup, wiring and limitations: DESIGN.md's "Azure Data Factory integration".
+
 ## Web frontend (Azure App Service)
 
 [`azure_app/`](azure_app/README.md) is a separate FastAPI web wrapper around

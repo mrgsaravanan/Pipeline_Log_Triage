@@ -429,18 +429,82 @@ below). Neither fixture is tracked in git - both fall under the repo's
 
 ## Azure Data Factory integration
 
-[`adf.py`](adf.py) triages failed ADF pipeline runs through the same path as any log
-(`run_triage` -> history/Postgres -> routing). Two triggers:
+[`adf.py`](adf.py) turns a failed ADF pipeline run into a plain-text log (the run's error plus
+each *failed* activity's `errorCode`/`message`/output), then triages it through the same path as
+any log: `run_triage` -> `.triage_history.jsonl` -> Postgres -> routing. Claude is always
+reached through the `claude` CLI (subscription); no billed API key is involved anywhere here.
 
-- **Poll**: `python adf.py --hours 24` queries `queryPipelineRuns` for Failed runs,
-  pulls each run's failed activity errors, and triages runs not yet in `.adf_seen.json`.
-  Set `ADF_SUBSCRIPTION_ID`, `ADF_RESOURCE_GROUP`, `ADF_FACTORY_NAME`; auth is
-  `ADF_ACCESS_TOKEN` or `az login` (no secrets in the repo). Schedule it with cron.
-- **Push**: `POST /api/adf/webhook` on `local_server.py`, guarded by `ADF_WEBHOOK_SECRET`
-  (header `X-ADF-Secret`). In ADF add a Web activity on the pipeline's *Failure* path with
-  body `{"pipelineName":"@{pipeline().Pipeline}","runId":"@{pipeline().RunId}",
-  "message":"@{activity('<name>').error.message}","errorCode":"@{activity('<name>').error.errorCode}"}`.
-  The server needs a public URL (e.g. a tunnel) since ADF cannot reach localhost.
+### Three ways in
 
-Limitations: polling has no cross-process lock; the webhook triages synchronously (a slow
-Claude call can exceed ADF's Web activity timeout); no tests hit real Azure.
+| Path | Where it runs | Claude call | Use when |
+|------|---------------|-------------|----------|
+| **Poll** `python adf.py --hours 24` | your machine | yes, via CLI | you can reach ADF from your laptop and don't need push |
+| **Webhook -> local/Azure server** `POST /api/adf/webhook` in `local_server.py` or `azure_app/main.py` (+ `POST /api/adf/poll` in `azure_app`) | the server | yes, in-request | the server can reach the `claude` CLI and has a public URL |
+| **Webhook -> Vercel queue -> drain** `POST /api/adf/webhook` in `api/index.py`, then `python adf.py --drain` | Vercel queues; your machine triages | only in `--drain`, on your machine | hosted dashboard on Vercel/Neon (Vercel can't use the subscription) |
+
+The Vercel route only inserts the failure into the `adf_events` table (`run_id` is unique, so
+re-delivery is ignored). `--drain` reads `status = 'pending'` rows, triages each, saves findings
+to the same Neon database, and marks the event `done`. Findings appear on the dashboard only
+after a drain.
+
+### Configuration
+
+| Variable | Needed by | Meaning |
+|----------|-----------|---------|
+| `ADF_SUBSCRIPTION_ID`, `ADF_RESOURCE_GROUP`, `ADF_FACTORY_NAME` | poll; `--drain` and the in-request webhooks when they should read activity errors from ADF | the factory to read. Without them the webhook paths triage the error text the webhook sent |
+| `ADF_ACCESS_TOKEN` | optional | management-plane bearer token. Otherwise the token comes from the App Service managed identity (`IDENTITY_ENDPOINT`), then `az account get-access-token` (`az login`) |
+| `ADF_WEBHOOK_SECRET` | every webhook/poll route | must equal the `X-ADF-Secret` header; if unset every call is rejected |
+| `DATABASE_URL` | `--drain`, Vercel webhook, dashboard | the Postgres (Neon) shared by all of the above |
+
+The managed identity (Azure container) needs *Data Factory Contributor*, or a custom role with
+`querypipelineruns/action` and `pipelineruns/queryactivityruns/action`, on the factory.
+
+### Wiring the pipeline (the Failure-path Web activity)
+
+Add a Web activity dependent on the failing activity with condition **Failed**: `POST` to
+`https://<host>/api/adf/webhook`, header `X-ADF-Secret`, body
+`{"pipelineName":"@{pipeline().Pipeline}","runId":"@{pipeline().RunId}",
+"message":"@{activity('<name>').error.message}","errorCode":"@{activity('<name>').error.errorCode}"}`.
+Two gotchas:
+
+- A *successful* failure-path activity makes the whole run `Succeeded`. Follow the Web activity
+  with a **Fail** activity (dependency *Completed*) so the run still shows as Failed in ADF and
+  to the poller.
+- Do not store the secret in the definition. The demo pipeline takes it as a `SecureString`
+  pipeline parameter (`adfWebhookSecret`) and turns on `secureInput` for the Web activity.
+
+### Demo pipeline
+
+`TriageDemoFailingPipeline` in factory `az-ins-df` (resource group `az-rgp`) exists to exercise
+this: `WaitBriefly` (5 s) -> `FailOnPurpose` (Fail, `SourceTableMissing`, "sales_daily not found
+in schema staging") -> `NotifyTriage` (Web, on failure, posts to
+`https://pipeline-log-triage.vercel.app/api/adf/webhook`) -> `FailPipeline` (Fail). Trigger it
+from Data Factory Studio (Author -> the pipeline -> Add trigger -> Trigger now) and enter the
+secret. The first run (before `NotifyTriage` existed) was triaged by the poller and saved to
+Neon as a P1 "Source table not found" finding routed to Platform & Infrastructure.
+
+### Checking runs in ADF
+
+Studio -> Monitor -> Pipeline runs (default window is 24 h). CLI:
+`az datafactory pipeline-run query-by-factory | show` and
+`az datafactory activity-run query-by-pipeline-run` (all take `--factory-name az-ins-df
+--resource-group az-rgp`; the queries need `--last-updated-after/--last-updated-before`). ADF
+keeps run history for 45 days.
+
+### Implementation notes
+
+- HTTPS uses the `certifi` CA bundle when installed: python.org macOS builds ship no system
+  CAs and otherwise fail with `CERTIFICATE_VERIFY_FAILED`.
+- The poller's dedupe list (`.adf_seen.json`, gitignored) is separate from the queue's
+  `adf_events` table. Running both for one factory can triage the same run twice: pick one.
+- Tests (`tests/test_adf.py`) mock the ADF REST calls and Postgres; nothing in the build gate
+  touches Azure or Claude.
+
+### Limitations
+
+- The in-request webhooks triage synchronously; a slow Claude call can exceed ADF's Web
+  activity timeout. The Vercel queue path avoids that (it only inserts).
+- Nothing drains the queue automatically: run `--drain` by hand or schedule it (cron/launchd).
+- `azure_app`'s `.adf_seen.json` lives on the container's ephemeral disk, so a restart can
+  re-triage recent runs.
+- Polling has no cross-process lock; no automated test hits real Azure.
