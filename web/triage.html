@@ -5,9 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pipeline Log Triage</title>
 <style>
-  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; }
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc;
+          --c1:#2a78d6; --c2:#e8590c; --c3:#2f9e44; --c4:#ae3ec9; --c5:#d6336c; --c6:#0c8599; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; }
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444;
+            --c1:#4c9aff; --c2:#ff8a4c; --c3:#51cf66; --c4:#d17cf0; --c5:#ff6b9d; --c6:#3bc9db; }
   }
   body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
          max-width:800px; margin:2rem auto; padding:0 1rem; }
@@ -16,12 +18,25 @@
   textarea { height:220px; font-family:monospace; font-size:.9rem; }
   label { display:block; margin-top:1rem; font-weight:600; }
   button { padding:.5rem 1.5rem; font-size:1rem; margin-top:.75rem; cursor:pointer; }
-  .failure { border-left:3px solid var(--err); padding-left:1rem; margin:1.25rem 0; }
-  .notes { background:var(--card); padding:1rem; margin-top:1.5rem; border-radius:4px; }
+  h1 { background:linear-gradient(90deg, var(--c1), var(--c4), var(--c5)); -webkit-background-clip:text;
+       background-clip:text; -webkit-text-fill-color:transparent; }
+  textarea:focus, input:focus { outline:2px solid var(--c1); outline-offset:1px; }
+  button { background:linear-gradient(90deg, var(--c1), var(--c4)); color:#fff; border:none; border-radius:6px;
+           font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.2); }
+  button:hover { filter:brightness(1.1); }
+  .failure { --tone:var(--c1); border-left:5px solid var(--tone); padding:.6rem 1rem; margin:1.25rem 0;
+             border-radius:0 8px 8px 0;
+             background:linear-gradient(90deg, color-mix(in srgb, var(--tone) 10%, var(--card)), transparent 70%); }
+  .failure:nth-of-type(4n+2) { --tone:var(--c4); }
+  .failure:nth-of-type(4n+3) { --tone:var(--c2); }
+  .failure:nth-of-type(4n) { --tone:var(--c3); }
+  .failure h3 { color:var(--tone); margin-top:.2rem; }
+  .notes { background:color-mix(in srgb, var(--c6) 12%, var(--card)); border-left:5px solid var(--c6);
+           padding:1rem; margin-top:1.5rem; border-radius:0 8px 8px 0; }
   .error { color:var(--err); white-space:pre-wrap; }
   .muted { color:var(--muted); font-size:.85rem; }
   details { margin-top:1.5rem; }
-  .badge { font-size:.75rem; padding:.05rem .45rem; border-radius:10px; border:1px solid var(--line); margin-left:.4rem; }
+  .badge { font-size:.75rem; padding:.05rem .45rem; border-radius:10px; border:1px solid var(--tone, var(--line)); color:var(--tone, inherit); margin-left:.4rem; }
   .fix { background:var(--card); padding:.6rem; border-radius:4px; white-space:pre-wrap; font-family:monospace; font-size:.85rem; }
   .actions { margin-top:1rem; }
   @media print { #themebar, #go, .actions, details, textarea, label, input { display:none !important; } }
