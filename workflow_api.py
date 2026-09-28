@@ -4,7 +4,9 @@ Mounted by local_server.py. Sessions are an HMAC-signed, HttpOnly, SameSite=Lax
 cookie; every route needs DATABASE_URL (see triage_db.py).
 """
 
+import json
 import os
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -12,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
+import adf
 import triage_db
 
 router = APIRouter(prefix="/api")
@@ -149,3 +152,42 @@ def update(finding_id: int, req: FindingUpdate,
             return triage_db.update_finding(conn, finding_id, user, changes)
     except triage_db.WorkflowError as e:
         raise HTTPException(e.status, str(e)) from e
+
+
+# ---------------------------------------------------------------- ADF queue
+# Vercel cannot run Claude, so on Vercel the drain is forwarded to the Azure container
+# (which has the claude login) with the shared ADF secret, kept server-side.
+AZURE_TRIAGE_URL = "https://pipeline-log-triage-saravanan.azurewebsites.net"
+
+
+def _azure_url() -> str:
+    return os.environ.get("AZURE_TRIAGE_URL") or (AZURE_TRIAGE_URL if os.environ.get("VERCEL")
+                                                   else "")
+
+
+@router.get("/adf/queue")
+def adf_queue(user: dict = Depends(current_user)) -> dict:
+    """How many ADF failures are waiting to be triaged."""
+    with _db() as conn:
+        return {"pending": len(triage_db.pending_adf_events(conn))}
+
+
+@router.post("/adf/drain")
+def adf_drain(user: dict = Depends(current_user)) -> dict:
+    """Triage the queued ADF failures; returns at once, work continues in the background."""
+    azure = _azure_url()
+    if not azure:  # local_server.py: the claude CLI is on this machine
+        return {"started": adf.start_drain()}
+    secret = os.environ.get("ADF_WEBHOOK_SECRET", "")
+    if not secret:
+        raise HTTPException(503, "ADF_WEBHOOK_SECRET is not set on this server")
+    req = urllib.request.Request(f"{azure.rstrip('/')}/api/adf/drain", data=b"{}",
+                                 method="POST",
+                                 headers={"X-ADF-Secret": secret,
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15,  # noqa: S310 - operator-set https URL
+                                    context=adf._ssl_context()) as resp:
+            return json.load(resp)
+    except OSError as e:
+        raise HTTPException(502, f"could not reach the triage server: {e}") from e

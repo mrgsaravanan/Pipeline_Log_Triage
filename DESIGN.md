@@ -447,6 +447,17 @@ re-delivery is ignored). `--drain` reads `status = 'pending'` rows, triages each
 to the same Neon database, and marks the event `done`. Findings appear on the dashboard only
 after a drain.
 
+### Dashboard button
+
+The signed-in dashboard has a **Run ADF drain** button and a "N ADF failures queued" counter
+(`GET /api/adf/queue`, read straight from Neon). Clicking it calls `POST /api/adf/drain`,
+which on Vercel forwards to the Azure container's `POST /api/adf/drain` with `X-ADF-Secret`
+(the secret stays server-side; needs `ADF_WEBHOOK_SECRET` on Vercel and on Azure, and the
+Azure image rebuilt). The container starts `adf.start_drain()` in a background thread (one at
+a time) and returns at once; the page polls the queue every 5 s and reloads the findings when
+it reaches 0. With `local_server.py` there is no forwarding: it drains in-process. Any
+signed-in user can press it. `AZURE_TRIAGE_URL` overrides the container URL.
+
 ### Configuration
 
 | Variable | Needed by | Meaning |

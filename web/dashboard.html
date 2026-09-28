@@ -96,6 +96,8 @@
     <select id="fTeam"><option value="">All teams</option></select>
     <label style="margin:0;font-weight:400"><input type="checkbox" id="fMine"> Assigned to me</label>
     <button id="refresh">Refresh</button>
+    <button id="drainBtn" type="button" title="Triage failures queued by Azure Data Factory">Run ADF drain</button>
+    <span id="drainMsg" class="muted"></span>
   </div>
   <p id="listErr" class="error"></p>
 
@@ -303,6 +305,41 @@ async function start() {
   fill($("eTeam"), teams.map((t) => [t.id, t.name]), "(unassigned)");
   show("app");
   await load();
+  refreshQueue();
+}
+
+// ADF failures queued by the pipeline's webhook; the drain triages them on the server
+// that holds the Claude login, in the background, so we poll until the queue is empty.
+let drainTimer = null;
+async function queuedCount() {
+  try { return (await api("/api/adf/queue")).pending; } catch { return null; }
+}
+async function refreshQueue() {
+  const n = await queuedCount();
+  $("drainMsg").textContent = n == null ? "" : `${n} ADF failure${n === 1 ? "" : "s"} queued`;
+  return n;
+}
+async function runDrain() {
+  clearInterval(drainTimer);
+  $("drainBtn").disabled = true;
+  const pending = await queuedCount();
+  if (pending === 0) { $("drainMsg").textContent = "Nothing queued"; $("drainBtn").disabled = false; return; }
+  $("drainMsg").textContent = "Starting...";
+  try { await api("/api/adf/drain", { method: "POST" }); }
+  catch (e) { $("drainMsg").textContent = e.message; $("drainBtn").disabled = false; return; }
+  let tries = 0;
+  drainTimer = setInterval(async () => {
+    tries += 1;
+    const n = await queuedCount();
+    if (n === 0 || n == null || tries >= 60) {
+      clearInterval(drainTimer);
+      $("drainBtn").disabled = false;
+      $("drainMsg").textContent = n === 0 ? "Drain finished" : "Still running - refresh later";
+      await load();
+    } else {
+      $("drainMsg").textContent = `Triaging... ${n} left`;
+    }
+  }, 5000);
 }
 
 async function load() {
@@ -433,6 +470,7 @@ $("logoutBtn").addEventListener("click", async () => {
   me = null; selected = null; $("detail").hidden = true; show("login");
 });
 $("refresh").addEventListener("click", load);
+$("drainBtn").addEventListener("click", runDrain);
 for (const id of ["fStatus", "fPriority", "fTeam", "fMine"]) $(id).addEventListener("change", load);
 $("eTeam").addEventListener("change", () => fillAssignees($("eTeam").value, ""));
 $("saveBtn").addEventListener("click", save);

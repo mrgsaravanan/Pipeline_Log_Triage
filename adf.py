@@ -26,6 +26,7 @@ import os
 import ssl
 import subprocess
 import sys
+import threading
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -202,6 +203,30 @@ def drain_queue() -> list[str]:
             done.append(ev["run_id"])
             print(f"triaged queued {ev['pipeline_name']} {ev['run_id']}")
     return done
+
+
+_drain_lock = threading.Lock()
+
+
+def start_drain() -> bool:
+    """Drain the queue in a background thread. False if a drain is already running.
+
+    Triage takes many seconds per failure, longer than a web request should wait, so the
+    HTTP routes start this and return immediately; callers watch the pending count.
+    """
+    if not _drain_lock.acquire(blocking=False):
+        return False
+
+    def work():
+        try:
+            drain_queue()
+        except Exception as e:  # noqa: BLE001 - background thread: report, never crash
+            print(f"error: background drain failed: {e}", file=sys.stderr)
+        finally:
+            _drain_lock.release()
+
+    threading.Thread(target=work, daemon=True).start()
+    return True
 
 
 def secret_ok(provided: str) -> bool:

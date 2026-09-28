@@ -342,6 +342,14 @@ def adf_poll(hours: float = 24, x_adf_secret: str = Header(default="")) -> dict:
     return {"triaged": len(done), "run_ids": done}
 
 
+@app.post("/api/adf/drain")
+def adf_drain(x_adf_secret: str = Header(default="")) -> dict:
+    """Start triaging queued ADF failures in the background (claude CLI runs here)."""
+    if not adf.secret_ok(x_adf_secret):
+        raise HTTPException(401, "bad or missing X-ADF-Secret")
+    return {"started": adf.start_drain()}
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}

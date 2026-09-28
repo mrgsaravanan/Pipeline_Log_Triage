@@ -129,3 +129,65 @@ def test_drain_queue_triages_and_marks_done(monkeypatch):
 def test_drain_queue_requires_database_url(monkeypatch):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     assert adf.main(["--drain"]) == 2
+
+
+def test_start_drain_runs_in_background_and_blocks_reentry(monkeypatch):
+    import threading
+    gate, ran = threading.Event(), []
+    monkeypatch.setattr(adf, "drain_queue", lambda: (gate.wait(5), ran.append(1)))
+    assert adf.start_drain() is True
+    assert adf.start_drain() is False  # already running
+    gate.set()
+    for _ in range(100):
+        if ran and adf._drain_lock.acquire(blocking=False):
+            adf._drain_lock.release()
+            break
+        threading.Event().wait(0.02)
+    assert ran == [1] and adf.start_drain() is True
+    adf._drain_lock.acquire()
+    adf._drain_lock.release()
+
+
+def test_azure_drain_endpoint_needs_secret(monkeypatch):
+    from azure_app import main
+    monkeypatch.setenv("ADF_WEBHOOK_SECRET", "s3")
+    monkeypatch.setattr(adf, "start_drain", lambda: True)
+    c = TestClient(main.app)
+    assert c.post("/api/adf/drain").status_code == 401
+    r = c.post("/api/adf/drain", headers={"X-ADF-Secret": "s3"})
+    assert r.json() == {"started": True}
+
+
+def test_dashboard_drain_requires_login_and_forwards_to_azure(monkeypatch):
+    import workflow_api
+    from api import index
+    c = TestClient(index.app)
+    assert c.post("/api/adf/drain").status_code == 401
+    assert c.get("/api/adf/queue").status_code == 401
+
+    index.app.dependency_overrides[workflow_api.current_user] = lambda: {"id": 1}
+    try:
+        monkeypatch.setenv("VERCEL", "1")
+        monkeypatch.setenv("ADF_WEBHOOK_SECRET", "s3")
+        seen = {}
+
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return b'{"started": true}'
+
+        def fake_urlopen(req, timeout, context):
+            seen["url"], seen["secret"] = req.full_url, req.get_header("X-adf-secret")
+            return Resp()
+
+        monkeypatch.setattr(workflow_api.urllib.request, "urlopen", fake_urlopen)
+        r = c.post("/api/adf/drain")
+        assert r.json() == {"started": True}
+        assert seen["url"].endswith("/api/adf/drain") and seen["secret"] == "s3"
+    finally:
+        index.app.dependency_overrides.clear()
