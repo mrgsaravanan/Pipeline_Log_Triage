@@ -392,7 +392,17 @@ function render() {
       el("td", Number(f.occurrences) > 1 ? `${f.occurrences}x` : "1x"),
       el("td", f.team_name || "-"), el("td", f.assignee || "-"),
       (() => { const td = el("td"); td.append(el("span", f.status, "pill " + f.status)); return td; })(),
-      (() => { const td = el("td", fmtEtaRelative(f.eta)); if (f.eta) td.title = fmtTime(f.eta); return td; })(),
+      (() => {
+        // Closed findings show when they were closed, not a countdown to a stale ETA.
+        // wont_fix has no resolved_at (it feeds the avg-resolution stat), so use updated_at.
+        if (f.status === "resolved" || f.status === "wont_fix") {
+          const when = f.status === "resolved" ? (f.resolved_at || f.updated_at) : f.updated_at;
+          const td = el("td", `${f.status === "resolved" ? "Resolved" : "Won't fix"} ${when ? new Date(when).toLocaleDateString() : "-"}`);
+          if (when) td.title = fmtTime(when);
+          return td;
+        }
+        const td = el("td", fmtEtaRelative(f.eta)); if (f.eta) td.title = fmtTime(f.eta); return td;
+      })(),
       el("td", money(f.estimated_cost)));
     tr.addEventListener("click", () => select(f));
     return tr;
