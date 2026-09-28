@@ -247,6 +247,28 @@ def test_record_run_swallows_db_errors(monkeypatch, capsys):
     assert "could not save triage to Postgres: db down" in capsys.readouterr().err
 
 
+def test_public_stats_exposes_only_aggregate_counts():
+    conn = FakeConn([
+        {"n": 5},  # total_runs
+        {"n": 12},  # total_findings
+        [{"category": "infra", "findings": 7}, {"category": "permissions", "findings": 5}],
+        {"hours": 7.25},  # mttr
+    ])
+    stats = triage_db.public_stats(conn)
+    assert stats == {
+        "total_runs": 5, "total_findings": 12,
+        "categories": [{"category": "infra", "findings": 7},
+                       {"category": "permissions", "findings": 5}],
+        "mttr_hours": 7.2,
+    }
+    assert "title" not in str(stats) and "team" not in str(stats)  # never finding/team specifics
+
+
+def test_public_stats_mttr_none_with_no_resolved_findings():
+    conn = FakeConn([{"n": 0}, {"n": 0}, [], {"hours": None}])
+    assert triage_db.public_stats(conn)["mttr_hours"] is None
+
+
 def test_one_log_flows_from_cli_through_to_the_dashboard_db(monkeypatch, capsys, tmp_path):
     """End-to-end for one log, with no real `claude` CLI call and no real Postgres:
     Triage.main() -> history append -> triage_db.record_run() -> save_run(), landing

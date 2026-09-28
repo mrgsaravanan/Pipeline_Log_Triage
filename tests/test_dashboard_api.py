@@ -23,3 +23,10 @@ def test_me_requires_login():
 def test_triage_route_is_not_exposed():
     # Triage needs the claude CLI, which only exists on the owner's machine.
     assert client.post("/api/triage", json={"text": "x"}).status_code in (404, 405)
+
+
+def test_public_stats_does_not_require_login():
+    # Unlike every other data route, /api/public-stats is for the public About
+    # page: no DATABASE_URL in this test env, so it 503s rather than 401ing -
+    # the point is it's never gated on being signed in.
+    assert client.get("/api/public-stats").status_code != 401

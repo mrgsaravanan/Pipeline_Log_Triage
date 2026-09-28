@@ -452,6 +452,27 @@ def trends(conn, weeks: int = 8) -> dict:
             "repeats": repeats}
 
 
+def public_stats(conn) -> dict:
+    """Aggregate counts safe to show with no login: totals, category breakdown,
+    and mean time to resolve - no titles, evidence, team names, or assignees."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM triage_runs")
+        total_runs = cur.fetchone()["n"]
+        cur.execute("SELECT count(*) AS n FROM triage_findings")
+        total_findings = cur.fetchone()["n"]
+        cur.execute("SELECT coalesce(category, 'other') AS category, count(*) AS findings "
+                    "FROM triage_findings GROUP BY 1 ORDER BY 2 DESC")
+        categories = cur.fetchall()
+        cur.execute(
+            "SELECT avg(extract(epoch FROM (resolved_at - created_at)) / 3600) AS hours "
+            "FROM triage_findings WHERE resolved_at IS NOT NULL")
+        mttr = cur.fetchone()["hours"]
+    return {
+        "total_runs": total_runs, "total_findings": total_findings, "categories": categories,
+        "mttr_hours": round(float(mttr), 1) if mttr is not None else None,
+    }
+
+
 def list_teams(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute("SELECT id, name, oncall_email, hourly_rate FROM teams ORDER BY id")

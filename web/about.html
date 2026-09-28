@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>About</title>
+<style>
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --line:#ccc; --accent:#2a78d6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --line:#444; --accent:#3987e5; }
+  }
+  body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
+         max-width:820px; margin:2rem auto; padding:0 1rem; }
+  h1 { margin-bottom:.2rem; }
+  h2 { margin:2rem 0 .5rem; font-size:1.15rem; border-bottom:1px solid var(--line); padding-bottom:.3rem; }
+  .muted { color:var(--muted); font-size:.85rem; }
+  code { background:var(--card); padding:.1rem .3rem; border-radius:3px; font-size:.9em; }
+  ul { padding-left:1.3rem; }
+  li { margin:.3rem 0; }
+  .stats { display:flex; gap:1rem; flex-wrap:wrap; margin:1rem 0; }
+  .stat { background:var(--card); padding:.6rem 1rem; border-radius:6px; min-width:130px; }
+  .stat b { display:block; font-size:1.3rem; }
+  .chart { background:var(--card); padding:.75rem 1rem 1rem; border-radius:6px; margin:1rem 0; }
+  .chart h3 { margin:0 0 .6rem; font-size:.95rem; }
+  .chart svg { display:block; width:100%; height:auto; overflow:visible; }
+  .chart .bar-mark { fill:var(--accent); }
+  .chart .axis-line { stroke:var(--line); stroke-width:1; shape-rendering:crispEdges; }
+  .chart .cat-label { fill:var(--fg); font-size:11px; }
+  .chart .value-label { fill:var(--muted); font-size:11px; }
+  .limits { background:var(--card); border-radius:6px; padding:.1rem 1rem; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<h1>About this dashboard</h1>
+<p class="muted"><a href="index.html">Home</a> &middot; <a href="triage.html">Triage a log</a>
+  &middot; <a href="dashboard.html">Workflow dashboard</a> &middot; <a href="trends.html">Trends and cost</a></p>
+
+<h2>Live totals</h2>
+<div id="liveStats">
+  <p class="muted">Loading...</p>
+</div>
+
+<h2>Model</h2>
+<p>Every triage is a single request to <code>claude-haiku-4-5</code>. There is no
+  conversation and no tool use - one log in, one structured report out.</p>
+<ul>
+  <li><b>Local CLI backend (default).</b> Runs <code>claude -p</code> as a subprocess,
+    billed against your own Claude subscription rather than a metered API key.</li>
+  <li><b>Hosted API backend.</b> Used automatically on Vercel (a serverless function
+    can't hold an interactive <code>claude login</code> session) via the
+    <code>anthropic</code> SDK, billed to a configured <code>ANTHROPIC_API_KEY</code>.</li>
+  <li><b>Screenshot triage.</b> The same prompt and model, given the image directly
+    (vision) instead of raw log text.</li>
+</ul>
+<p>Per distinct failure the model returns: a short <b>failure_type</b> label,
+  <b>what_broke</b>, <b>evidence</b> quoted from the log, a <b>next_step</b>,
+  <b>severity</b> (critical/high/medium/low), a 0-1 <b>confidence</b>, an optional
+  <b>suggested_fix</b>, and a <b>category</b> - the last one is what auto-routes the
+  finding to a team and picks whichever team member currently has the fewest open
+  findings.</p>
+
+<h2>RAG pipeline</h2>
+<p class="muted">Optional, local-only (<code>TRIAGE_RAG=1</code>) - never enabled on
+  Vercel or Azure, since its dependencies pull in PyTorch.</p>
+<ul>
+  <li><b>Knowledge base.</b> 12 known-failure categories (S3 permissions, schema
+    drift, OOM, timeouts, data-quality rejects, expired credentials, throttling,
+    encoding, ...) plus past triage results, de-duplicated, in a local FAISS index.</li>
+  <li><b>Embeddings.</b> <code>all-MiniLM-L6-v2</code> via <code>sentence-transformers</code> -
+    free, local, no API key. Vectors are L2-normalized so inner product = cosine
+    similarity.</li>
+  <li><b>Retrieval.</b> One short query per distinct error-ish log line (max 8),
+    searched separately and merged by best distance - a single whole-log embedding
+    would miss failures past the model's ~256-word-piece window.</li>
+  <li><b>Prompt.</b> The top 3 matches go in as background context only, explicitly
+    never as evidence the model can cite directly.</li>
+  <li><b>Fail-soft.</b> A missing package, a model-download failure, or a bad index
+    prints a one-line note and triage proceeds without retrieval.</li>
+</ul>
+<div class="limits">
+  <p><b>Known limits, stated plainly:</b></p>
+  <ul>
+    <li>No clean similarity cutoff - right matches and irrelevant filler score in
+      overlapping ranges, so the model is told to judge weak matches itself.</li>
+    <li>Re-triaging a log already in history retrieves its own prior answer as a
+      "similar case."</li>
+    <li>First run downloads a ~90 MB embedding model.</li>
+  </ul>
+</div>
+
+<h2>Software</h2>
+<ul>
+  <li><b>Backend:</b> Python, FastAPI, Pydantic (schema validation for the model's
+    structured output), <code>psycopg</code> for Postgres.</li>
+  <li><b>Frontend:</b> plain HTML/CSS/vanilla JavaScript - no framework, no build
+    step. Four pages: this site's home, triage form, workflow dashboard, and
+    trends.</li>
+  <li><b>Auth:</b> HMAC-signed, HttpOnly session cookies; passwords stored as salted
+    scrypt hashes.</li>
+  <li><b>Container:</b> Docker, <code>python:3.12-slim</code> base image (Azure
+    deployment only).</li>
+</ul>
+
+<h2>Hardware / hosting</h2>
+<ul>
+  <li><b>Azure App Service</b> (Linux, custom Docker container) - B1 Basic plan,
+    West US 2 - serves the always-on triage form and its JSON API.</li>
+  <li><b>Vercel</b> - static hosting for this site plus a serverless function for
+    the dashboard's login/findings API. Vercel itself never calls Claude.</li>
+  <li><b>Neon</b> - serverless Postgres (us-east-1) backing the dashboard, shared by
+    the Azure app, the Vercel API, and a local <code>local_server.py</code> run.</li>
+  <li><b>Local machine</b> - the Vercel-hosted triage form's other configuration
+    routes requests to <code>local_server.py</code> running on the owner's own Mac,
+    which triages via the <code>claude</code> CLI against their Claude subscription -
+    no API key, nothing billed to a hosted account.</li>
+</ul>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const SVG_NS = "http://www.w3.org/2000/svg";
+function el(tag, text = "", cls = "") {
+  const e = document.createElement(tag);
+  e.textContent = text;
+  if (cls) e.className = cls;
+  return e;
+}
+function svgEl(tag, attrs = {}) {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+// Same horizontal ranking bar chart as trends.html, trimmed to this page's needs.
+function hBarChart(rows, labelKey, valueKey) {
+  const box = document.createElement("div");
+  box.className = "chart";
+  if (!rows.length) { box.append(el("span", "No data yet.", "muted")); return box; }
+
+  const W = 480, labelW = 132, rightPad = 40, rowH = 28, barH = 20, topPad = 4;
+  const barAreaW = W - labelW - rightPad;
+  const H = topPad * 2 + rows.length * rowH;
+  const max = Math.max(1, ...rows.map((r) => Number(r[valueKey]) || 0));
+
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img",
+    "aria-label": `Bar chart of ${valueKey} by ${labelKey}` });
+  svg.append(svgEl("line", { class: "axis-line", x1: labelW, y1: 0, x2: labelW, y2: H }));
+
+  rows.forEach((r, i) => {
+    const y = topPad + i * rowH;
+    const value = Number(r[valueKey]) || 0;
+    const w = Math.max(2, (value / max) * barAreaW);
+    const label = String(r[labelKey] ?? "");
+    const g = svgEl("g", { tabindex: "0" });
+    const barY = y + (rowH - barH) / 2;
+    g.append(svgEl("rect", { class: "bar-mark", x: labelW, y: barY, width: w, height: barH, rx: 4, ry: 4 }));
+    const labelText = svgEl("text", { class: "cat-label", x: labelW - 8, y: y + rowH / 2,
+      "text-anchor": "end", "dominant-baseline": "middle" });
+    labelText.textContent = label.length > 22 ? label.slice(0, 21) + "…" : label;
+    const valueText = svgEl("text", { class: "value-label", x: labelW + w + 8, y: y + rowH / 2,
+      "text-anchor": "start", "dominant-baseline": "middle" });
+    valueText.textContent = String(value);
+    const title = svgEl("title", {});
+    title.textContent = `${label}: ${value}`;
+    g.append(labelText, valueText, title);
+    svg.append(g);
+  });
+  box.append(svg);
+  return box;
+}
+
+(async () => {
+  try {
+    const res = await fetch("/api/public-stats");
+    if (!res.ok) throw new Error(`stats unavailable (${res.status})`);
+    const s = await res.json();
+    const stats = document.createElement("div");
+    stats.className = "stats";
+    for (const [label, value] of [
+      ["Runs triaged", s.total_runs],
+      ["Findings found", s.total_findings],
+      ["Mean time to resolve", s.mttr_hours == null ? "–" : `${s.mttr_hours}h`],
+    ]) {
+      const d = el("div", "", "stat");
+      d.append(el("b", String(value)), el("span", label, "muted"));
+      stats.append(d);
+    }
+    const chart = hBarChart(s.categories, "category", "findings");
+    chart.prepend(el("h3", "Findings by category"));
+    $("liveStats").replaceChildren(stats, chart);
+  } catch (e) {
+    $("liveStats").replaceChildren(el("p", `Live stats unavailable: ${e.message}`, "muted"));
+  }
+})();
+</script>
+</body>
+</html>

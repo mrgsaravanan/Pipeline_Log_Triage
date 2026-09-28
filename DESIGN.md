@@ -418,5 +418,11 @@ below). Neither fixture is tracked in git - both fall under the repo's
   Markdown export; the triage page can download a report or print to PDF.
 - **Site structure.** `web/index.html` is a home page linking to `triage.html`
   (paste/upload a log), `dashboard.html` (sign in to assign/track/cost
-  findings) and `trends.html` (the charts above) - three separate pages
-  instead of one page with everything embedded.
+  findings), `trends.html` (the charts above) and `about.html` (model, RAG
+  pipeline, and software/hardware behind the site) - separate pages instead of
+  one page with everything embedded.
+- **`about.html` is public but only shows aggregate counts.** It calls
+  `GET /api/public-stats` (`triage_db.public_stats()`), the one workflow route
+  with no `Depends(current_user)` - total runs, total findings, a category
+  breakdown, and MTTR, never finding titles, evidence, team names, or
+  assignees. Every other workflow route stays behind the session cookie.

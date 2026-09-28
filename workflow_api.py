@@ -61,6 +61,14 @@ class FindingUpdate(BaseModel):
     resolution_notes: str | None = None
 
 
+@router.get("/public-stats")
+def public_stats() -> dict:
+    """No login required: aggregate counts only, for the public About page -
+    never finding titles/evidence, team names, or assignees."""
+    with _db() as conn:
+        return triage_db.public_stats(conn)
+
+
 @router.post("/login")
 def login(req: LoginRequest, response: Response) -> dict:
     with _db() as conn:
