@@ -5,9 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Trends and cost</title>
 <style>
-  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; --accent:#2a78d6; }
+  :root { --bg:#fff; --fg:#1a1a1a; --muted:#666; --card:#f5f5f5; --err:#c00; --line:#ccc; --accent:#2a78d6;
+          --c1:#2a78d6; --c2:#e8590c; --c3:#2f9e44; --c4:#ae3ec9;
+          --c5:#d6336c; --c6:#0c8599; --c7:#f08c00; --c8:#5f3dc4; }
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; --accent:#3987e5; }
+    :root { --bg:#161616; --fg:#eee; --muted:#999; --card:#242424; --err:#ff6b6b; --line:#444; --accent:#3987e5;
+            --c1:#4c9aff; --c2:#ff8a4c; --c3:#51cf66; --c4:#d17cf0;
+            --c5:#ff6b9d; --c6:#3bc9db; --c7:#ffc233; --c8:#9b87f5; }
   }
   body { font-family:-apple-system,system-ui,sans-serif; background:var(--bg); color:var(--fg);
          max-width:1100px; margin:2rem auto; padding:0 1rem; }
@@ -17,15 +21,28 @@
   label { display:block; font-weight:600; margin:.6rem 0 .2rem; font-size:.85rem; }
   .muted { color:var(--muted); font-size:.85rem; }
   .error { color:var(--err); white-space:pre-wrap; }
+  h1 { background:linear-gradient(90deg, var(--c1), var(--c4), var(--c5)); -webkit-background-clip:text;
+       background-clip:text; -webkit-text-fill-color:transparent; }
   header { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:.5rem; }
   .login { max-width:320px; margin:4rem auto; }
   .login input { width:100%; }
   .trends { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:1rem; margin:1rem 0; }
-  .trends > div { background:var(--card); padding:.75rem 1rem 1rem; border-radius:6px; }
-  .trends h3 { margin:0 0 .6rem; font-size:.95rem; }
+  .trends > div { background:var(--card); padding:.75rem 1rem 1rem; border-radius:8px;
+                  border-top:4px solid var(--tone, var(--accent));
+                  box-shadow:0 1px 3px rgba(0,0,0,.12); }
+  .trends > div:nth-child(1) { --tone:var(--c1); }
+  .trends > div:nth-child(2) { --tone:var(--c4); }
+  .trends > div:nth-child(3) { --tone:var(--c2); }
+  .trends > div:nth-child(4) { --tone:var(--c3); }
+  .trends > div:nth-child(5) { --tone:var(--c5); }
+  .trends h3 { margin:0 0 .6rem; font-size:.95rem; color:var(--tone, var(--fg)); }
   .chart-empty { color:var(--muted); font-size:.85rem; }
   .chart svg { display:block; width:100%; height:auto; overflow:visible; }
-  .chart .bar-mark, .chart .col-mark { fill:var(--accent); }
+  .chart .bar-mark, .chart .col-mark { fill:var(--tone, var(--accent)); }
+  .chart .fill1 { fill:var(--c1) !important; } .chart .fill2 { fill:var(--c2) !important; }
+  .chart .fill3 { fill:var(--c3) !important; } .chart .fill4 { fill:var(--c4) !important; }
+  .chart .fill5 { fill:var(--c5) !important; } .chart .fill6 { fill:var(--c6) !important; }
+  .chart .fill7 { fill:var(--c7) !important; } .chart .fill8 { fill:var(--c8) !important; }
   .chart .bar-row:hover .bar-mark, .chart .bar-row:focus .bar-mark,
   .chart .col-col:hover .col-mark, .chart .col-col:focus .col-mark { opacity:.75; }
   .chart .bar-row, .chart .col-col { outline:none; cursor:default; }
@@ -34,7 +51,9 @@
   .chart .value-label { fill:var(--muted); font-size:11px; }
   /* Hero figure: mean time to resolve */
   .hero { display:flex; flex-direction:column; align-items:flex-start; gap:.15rem; padding-top:.25rem; }
-  .hero b { font-size:2.4rem; font-weight:600; line-height:1; }
+  .hero b { font-size:2.6rem; font-weight:700; line-height:1; color:var(--tone);
+            background:linear-gradient(90deg, var(--c3), var(--c6)); -webkit-background-clip:text;
+            background-clip:text; -webkit-text-fill-color:transparent; }
   [hidden] { display:none !important; }
 </style>
 </head>
@@ -146,7 +165,7 @@ function hBarChart(rows, labelKey, valueKey, fmt = (v) => String(v)) {
     const g = svgEl("g", { class: "bar-row", tabindex: "0" });
     const barY = y + (rowH - barH) / 2;
     g.append(svgEl("rect", {
-      class: "bar-mark", x: labelW, y: barY, width: w, height: barH, rx: 4, ry: 4,
+      class: "bar-mark fill" + ((i % 8) + 1), x: labelW, y: barY, width: w, height: barH, rx: 4, ry: 4,
     }));
     const labelText = svgEl("text", {
       class: "cat-label", x: labelW - 8, y: y + rowH / 2, "text-anchor": "end",
