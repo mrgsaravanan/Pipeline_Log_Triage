@@ -260,6 +260,15 @@ function fill(select, options, blank) {
   for (const [value, label] of options) select.append(new Option(label, value));
 }
 const fmtTime = (t) => t ? new Date(t).toLocaleString() : "-";
+// Relative countdown in whole days + hours, e.g. "in 2d 4h" / "3d 2h overdue".
+function fmtEtaRelative(t) {
+  if (!t) return "-";
+  const diffMs = new Date(t) - Date.now();
+  const overdue = diffMs < 0;
+  const totalHours = Math.round(Math.abs(diffMs) / 3600000);
+  const days = Math.floor(totalHours / 24), hours = totalHours % 24;
+  return overdue ? `${days}d ${hours}h overdue` : `in ${days}d ${hours}h`;
+}
 const money = (n) => n == null ? "-" : "$" + Number(n).toFixed(0);
 function toLocalInput(t) {
   if (!t) return "";
@@ -327,7 +336,8 @@ function render() {
       el("td", Number(f.occurrences) > 1 ? `${f.occurrences}x` : "1x"),
       el("td", f.team_name || "-"), el("td", f.assignee || "-"),
       (() => { const td = el("td"); td.append(el("span", f.status, "pill " + f.status)); return td; })(),
-      el("td", fmtTime(f.eta)), el("td", money(f.estimated_cost)));
+      (() => { const td = el("td", fmtEtaRelative(f.eta)); if (f.eta) td.title = fmtTime(f.eta); return td; })(),
+      el("td", money(f.estimated_cost)));
     tr.addEventListener("click", () => select(f));
     return tr;
   }));
