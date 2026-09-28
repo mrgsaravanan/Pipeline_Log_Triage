@@ -1,6 +1,6 @@
 # Session log: hosting Pipeline Log Triage on Vercel + Azure
 
-Date: 2026-09-23 to 2026-09-27. No secrets are recorded here; where a value is
+Date: 2026-09-23 to 2026-09-28. No secrets are recorded here; where a value is
 needed it is described by name only.
 
 ## Goal
@@ -135,6 +135,41 @@ browser --> Vercel (static UI in web/ + dashboard API in api/index.py)
     own live-verification triages run after that truncation, not real pipeline
     failures.
 
+21. **Azure Data Factory integration (`adf.py`).** Failed ADF runs are turned into
+    a text log (run error plus each failed activity's error) and triaged like any
+    other log. Three paths: `python adf.py --hours N` (poll), a webhook on
+    `local_server.py`/`azure_app` (triage in-request), and a Vercel webhook that only
+    queues the failure in a new `adf_events` table, drained locally with
+    `python adf.py --drain` (Vercel cannot use the subscription). Auth to ADF is
+    `az login`, or the App Service managed identity in the container. Commits
+    `7b4c04d`, `4ccb968`, `3ed7b3b`, `5f1218e`; documented in DESIGN.md.
+22. **First live ADF test and a TLS fix.** Created `TriageDemoFailingPipeline` in the
+    existing factory `az-ins-df` (resource group `az-rgp`): Wait -> Fail
+    (`SourceTableMissing`). Ran it; it failed as designed. The first poll failed with
+    `CERTIFICATE_VERIFY_FAILED` (python.org macOS build has no CA bundle), fixed by
+    using `certifi` (`cb1b76c`); the re-run triaged it into one "Source table not
+    found" finding (high, infra).
+23. **Failure saved to Neon.** `DATABASE_URL` was not in the shell, so the run had
+    only reached the local history file. The value was read from the Azure App
+    Service setting (never printed) and the existing result re-saved with
+    `triage_db.record_run` - no second Claude call. It became finding 9, P1, routed
+    to Platform & Infrastructure.
+24. **Webhook activity added to the pipeline.** `NotifyTriage` (Web, on failure)
+    posts to `https://pipeline-log-triage.vercel.app/api/adf/webhook`; `FailPipeline`
+    (Fail) follows it so a successful failure-path activity does not turn the run
+    `Succeeded`. The secret is a `SecureString` pipeline parameter
+    (`adfWebhookSecret`), not stored in the definition. **Not yet triggered**, so the
+    Vercel webhook path is untested end to end; `--drain` was run twice and found an
+    empty queue.
+25. **Dashboard users on the About page.** At the owner's choice (after being advised
+    against showing passwords, and told they cannot be read back), a public
+    `GET /api/public-users` lists team, full name, username and role - never a hash,
+    email or rate (`831bd5a`). See the caution below.
+26. **About page content.** Added "How to use it", "Integrations" and "Key advantages"
+    (`bf52490`), and corrected the Model section, which wrongly said Vercel used the
+    billed API backend: every deployment uses the `claude` CLI, Vercel never calls
+    Claude, and the API backend is off by default (`75fbf33`).
+
 ## Improvements implemented
 
 - **Severity, confidence, suggested fix** per failure (`Failure` model, prompt,
@@ -167,11 +202,15 @@ Design notes are in `DESIGN.md` under "Triage improvements".
 
 ## Configuration reference (names only)
 
-Vercel: `DATABASE_URL`, `TRIAGE_SECRET_KEY`.
+Vercel: `DATABASE_URL`, `TRIAGE_SECRET_KEY`, and (needed for the ADF webhook, **not yet
+confirmed set**) `ADF_WEBHOOK_SECRET`.
 
 Azure app settings: `WEBSITES_PORT=8000`, `DOCKER_REGISTRY_SERVER_URL/USERNAME/PASSWORD`,
 `CLAUDE_CODE_OAUTH_TOKEN`, `TRIAGE_ALLOWED_ORIGINS`,
 `TRIAGE_INGEST_TOKEN`, `DATABASE_URL`, `TRIAGE_SECRET_KEY` (must equal Vercel's).
+ADF (all optional): `ADF_WEBHOOK_SECRET`, `ADF_SUBSCRIPTION_ID`, `ADF_RESOURCE_GROUP`,
+`ADF_FACTORY_NAME`, `ADF_ACCESS_TOKEN`; the container also needs its managed identity
+enabled with a role on the factory.
 Optional: `TRIAGE_WEBHOOK_URL`, `TRIAGE_SMTP_HOST`/`FROM`/`PORT`/`USER`/`PASSWORD`,
 `TRIAGE_RATE_LIMIT`.
 `TRIAGE_ACCESS_CODE` was **removed** (see timeline item 14) - `/triage` and
@@ -201,7 +240,15 @@ light and dark mode, colour-coded priority/status pills, click-to-sort, the
 ETA countdown (including the overdue case), and the About page before and
 after its Live Totals section was removed.
 
-Not verified: Markdown export and print/PDF buttons in a browser; the GitHub
+ADF: the pipeline creation and run, the activity-run query, the poller (after the TLS
+fix) and the Neon save were verified live; `adf.py --drain` connected to Neon and
+returned an empty queue; the new About sections and `/api/public-users` were checked
+via the API/tests, not visually in a browser.
+
+Not verified: the Vercel ADF webhook end to end (pipeline not triggered; Vercel env
+vars unconfirmed; deployment of `3ed7b3b` unconfirmed); the ADF endpoints and managed
+identity in the Azure container (**the image has not been rebuilt**, so the running
+container does not have `adf.py` yet); Markdown export and print/PDF buttons in a browser; the GitHub
 Action example against a real repo; cold-start latency of the Azure
 container; the local Postgres + `seed_db.py` path (separate from the Neon
 database everything above was tested against).
@@ -238,3 +285,16 @@ database everything above was tested against).
   since accumulated a mix of the owner's real findings and Claude's own
   live-verification test triages (S3/OOM/disk-full/etc. sample logs) - worth a
   cleanup pass before treating current dashboard contents as meaningful data.
+- **Public usernames plus a shared, guessable password.** The About page now publishes
+  the 6 usernames (timeline item 25) while all of them share the password `admin`
+  (item 15). Together anyone can sign in to the dashboard and edit findings. Change the
+  passwords (or remove the usernames from the page) before treating this as real auth;
+  login has no rate limiting beyond the per-caller limiter.
+- **Azure image is stale.** Rebuild and restart (commands in the configuration
+  reference) to deploy `adf.py` and `/api/adf/*` to the container.
+- **Two ADF dedupe records.** The poller's `.adf_seen.json` and the queue's `adf_events`
+  are separate; using both on one factory can triage a run twice.
+- **Queue is not drained automatically.** Failures wait in `adf_events` until
+  `python adf.py --drain` runs (with `DATABASE_URL` set); schedule it if wanted.
+- The demo pipeline lives in the owner's real factory `az-ins-df`; delete it in Data
+  Factory Studio when no longer needed.
