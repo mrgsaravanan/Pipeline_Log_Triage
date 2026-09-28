@@ -190,6 +190,8 @@ def drain_queue() -> list[str]:
     """
     import triage_db
 
+    if not triage_db.db_configured():
+        raise AdfError(f"{triage_db.DB_ENV} is not set (point it at the same Neon database)")
     done = []
     with triage_db.connect() as conn:
         triage_db.ensure_migrated(conn)
