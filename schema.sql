@@ -93,3 +93,16 @@ CREATE INDEX IF NOT EXISTS idx_findings_status_priority ON triage_findings (stat
 CREATE INDEX IF NOT EXISTS idx_findings_team ON triage_findings (assigned_team_id);
 
 COMMIT;
+
+-- ADF failures queued by the hosted webhook (Vercel never calls Claude); a local
+-- `python adf.py --drain` triages them with the claude CLI and marks them done.
+CREATE TABLE IF NOT EXISTS adf_events (
+    id            SERIAL PRIMARY KEY,
+    run_id        TEXT UNIQUE NOT NULL,
+    pipeline_name TEXT,
+    error_code    TEXT,
+    message       TEXT,
+    status        TEXT NOT NULL DEFAULT 'pending',   -- pending | done
+    received_at   TIMESTAMPTZ DEFAULT now(),
+    triaged_at    TIMESTAMPTZ
+);

@@ -213,8 +213,38 @@ def ensure_migrated(conn) -> None:
     with conn.cursor() as cur:
         cur.execute("ALTER TABLE triage_findings ADD COLUMN IF NOT EXISTS signature TEXT")
         cur.execute("ALTER TABLE triage_findings ADD COLUMN IF NOT EXISTS proposed_fix TEXT")
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS adf_events (id SERIAL PRIMARY KEY, "
+            "run_id TEXT UNIQUE NOT NULL, pipeline_name TEXT, error_code TEXT, message TEXT, "
+            "status TEXT NOT NULL DEFAULT 'pending', received_at TIMESTAMPTZ DEFAULT now(), "
+            "triaged_at TIMESTAMPTZ)")
     conn.commit()
     _migrated = True
+
+
+def queue_adf_event(conn, run_id: str, pipeline: str, error_code: str, message: str) -> bool:
+    """Queue an ADF failure for local triage. False if this run was already queued."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO adf_events (run_id, pipeline_name, error_code, message) "
+            "VALUES (%s,%s,%s,%s) ON CONFLICT (run_id) DO NOTHING RETURNING id",
+            (run_id, pipeline, error_code, message))
+        queued = cur.fetchone() is not None
+    conn.commit()
+    return queued
+
+
+def pending_adf_events(conn) -> list[dict]:
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM adf_events WHERE status = 'pending' ORDER BY id")
+        return cur.fetchall()
+
+
+def mark_adf_event_done(conn, event_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute("UPDATE adf_events SET status = 'done', triaged_at = now() WHERE id = %s",
+                    (event_id,))
+    conn.commit()
 
 
 def run_findings(conn, run_id: int) -> list[dict]:

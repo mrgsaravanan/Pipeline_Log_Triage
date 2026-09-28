@@ -49,3 +49,20 @@ TRIAGE_ALLOWED_ORIGINS="https://your-app.vercel.app" python local_server.py
 - The old API-key Vercel deployment (`azure_app/main.py` + `anthropic`) is no
   longer wired to Vercel; that code remains for the Azure container and the
   optional `TRIAGE_BACKEND=api` mode.
+
+## Azure Data Factory webhook on Vercel
+
+`POST /api/adf/webhook` (in `api/index.py`) lets an ADF Web activity on a pipeline's
+Failure path report a failed run to the hosted app. Vercel never calls Claude, so the route
+only **queues** the failure in the `adf_events` table (Neon); the dashboard shows nothing
+until it is triaged. On your machine (with `DATABASE_URL` set to the same Neon database):
+
+    python adf.py --drain      # triages queued failures via the claude CLI, saves findings
+
+Run it by hand or from cron/launchd. Set `ADF_WEBHOOK_SECRET` in the Vercel project; ADF
+sends it as the `X-ADF-Secret` header, with body
+`{"pipelineName":"@{pipeline().Pipeline}","runId":"@{pipeline().RunId}",
+"message":"@{activity('<name>').error.message}","errorCode":"@{activity('<name>').error.errorCode}"}`.
+Re-delivery of the same runId is ignored. `--drain` also reads the run's activity errors
+from ADF when `ADF_SUBSCRIPTION_ID`/`ADF_RESOURCE_GROUP`/`ADF_FACTORY_NAME` and `az login`
+are available, otherwise it triages the webhook's own error text.

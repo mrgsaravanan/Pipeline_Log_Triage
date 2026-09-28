@@ -78,3 +78,48 @@ def test_managed_identity_token_used_when_present(monkeypatch):
     monkeypatch.setenv("IDENTITY_HEADER", "h")
     monkeypatch.setattr(adf, "_managed_identity_token", lambda: "mi-token")
     assert adf._token() == "mi-token"
+
+
+def test_vercel_webhook_queues_without_calling_claude(monkeypatch):
+    from api import index
+    monkeypatch.setenv("ADF_WEBHOOK_SECRET", "s3")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x")
+    queued = []
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(index.triage_db, "connect", lambda: Conn())
+    monkeypatch.setattr(index.triage_db, "ensure_migrated", lambda c: None)
+    monkeypatch.setattr(index.triage_db, "queue_adf_event",
+                        lambda c, *a: queued.append(a) or True)
+    monkeypatch.setattr(adf, "triage_run", lambda *a: 1 / 0)  # must never be reached
+    c = TestClient(index.app)
+    body = {"pipelineName": "P", "runId": "r1", "message": "boom", "errorCode": "E"}
+    r = c.post("/api/adf/webhook", json=body, headers={"X-ADF-Secret": "s3"})
+    assert r.json() == {"queued": True} and queued == [("r1", "P", "E", "boom")]
+    assert c.post("/api/adf/webhook", json=body).status_code == 401
+
+
+def test_drain_queue_triages_and_marks_done(monkeypatch):
+    import triage_db
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    done, seen = [], []
+    monkeypatch.setattr(triage_db, "connect", lambda: Conn())
+    monkeypatch.setattr(triage_db, "ensure_migrated", lambda c: None)
+    monkeypatch.setattr(triage_db, "pending_adf_events", lambda c: [
+        {"id": 7, "run_id": "r1", "pipeline_name": "P", "error_code": "E", "message": "m"}])
+    monkeypatch.setattr(triage_db, "mark_adf_event_done", lambda c, i: done.append(i))
+    monkeypatch.setattr(adf, "triage_webhook", lambda *a: seen.append(a))
+    assert adf.drain_queue() == ["r1"] and done == [7] and seen == [("P", "r1", "m", "E")]

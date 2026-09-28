@@ -183,6 +183,25 @@ def poll(hours: float = 24) -> list[str]:
     return done
 
 
+def drain_queue() -> list[str]:
+    """Triage failures the hosted (Vercel) webhook queued in Postgres; returns run ids done.
+
+    Runs on the owner's machine so Claude is reached via the subscription CLI.
+    """
+    import triage_db
+
+    done = []
+    with triage_db.connect() as conn:
+        triage_db.ensure_migrated(conn)
+        for ev in triage_db.pending_adf_events(conn):
+            triage_webhook(ev["pipeline_name"] or "", ev["run_id"], ev["message"] or "",
+                           ev["error_code"] or "")
+            triage_db.mark_adf_event_done(conn, ev["id"])
+            done.append(ev["run_id"])
+            print(f"triaged queued {ev['pipeline_name']} {ev['run_id']}")
+    return done
+
+
 def secret_ok(provided: str) -> bool:
     """Constant-time check of X-ADF-Secret; always False when no secret is configured."""
     secret = os.environ.get("ADF_WEBHOOK_SECRET", "")
@@ -203,8 +222,13 @@ def triage_webhook(pipeline: str, run_id: str, message: str = "", error_code: st
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Triage failed Azure Data Factory runs")
     ap.add_argument("--hours", type=float, default=24, help="look-back window (default 24)")
+    ap.add_argument("--drain", action="store_true",
+                    help="triage failures queued in Postgres by the hosted webhook")
     args = ap.parse_args(argv)
     try:
+        if args.drain:
+            print(f"{len(drain_queue())} queued failure(s) triaged")
+            return 0
         print(f"{len(poll(args.hours))} new failed run(s) triaged")
         return 0
     except AdfError as e:
