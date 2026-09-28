@@ -49,6 +49,9 @@
   .pill.wont_fix { color:var(--wf); border-color:var(--wf); }
   .status-arrow { color:var(--muted); }
   th { position:relative; }
+  .sort-btn { background:none; border:none; cursor:pointer; color:var(--muted); font-size:.75rem;
+    padding:0 0 0 .3rem; margin:0; vertical-align:middle; }
+  .sort-btn:hover, .sort-btn.active { color:var(--fg); }
   .colinfo summary { cursor:pointer; list-style:none; display:inline-flex; align-items:center; gap:.2rem; }
   .colinfo summary::-webkit-details-marker { display:none; }
   .colinfo summary::after { content:"\25be"; font-size:.65rem; color:var(--muted); }
@@ -159,6 +162,22 @@ const COLUMN_INFO = [
   ["Est. cost", "Estimated hours × the assigned team's hourly rate. A placeholder estimate, not "
     + "actual tracked cost - edit estimated hours in the finding detail to correct it."],
 ];
+// One value-extractor per COLUMN_INFO entry, same order, for click-to-sort.
+const SORT_KEYS = [
+  (f) => f.id,
+  (f) => (f.title || "").toLowerCase(),
+  (f) => (f.category || "").toLowerCase(),
+  (f) => f.priority || "",
+  (f) => f.confidence == null ? -1 : Number(f.confidence),
+  (f) => Number(f.occurrences) || 0,
+  (f) => (f.team_name || "").toLowerCase(),
+  (f) => (f.assignee || "").toLowerCase(),
+  (f) => STATUSES.indexOf(f.status),
+  (f) => f.eta || "",
+  (f) => f.estimated_cost == null ? -1 : Number(f.estimated_cost),
+];
+let sortCol = null, sortDir = "asc";
+const sortButtons = [];
 const $ = (id) => document.getElementById(id);
 const store = {
   get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
@@ -193,7 +212,8 @@ function el(tag, text = "", cls = "") {
   return e;
 }
 function renderColumnHeaders() {
-  $("colHeaders").replaceChildren(...COLUMN_INFO.map(([label, desc]) => {
+  sortButtons.length = 0;
+  $("colHeaders").replaceChildren(...COLUMN_INFO.map(([label, desc], i) => {
     const th = document.createElement("th");
     const details = document.createElement("details");
     details.className = "colinfo";
@@ -201,9 +221,38 @@ function renderColumnHeaders() {
     summary.textContent = label;
     const panel = el("div", desc, "info-panel");
     details.append(summary, panel);
-    th.append(details);
+    const sortBtn = el("button", "⇅", "sort-btn");
+    sortBtn.type = "button";
+    sortBtn.setAttribute("aria-label", `Sort by ${label}`);
+    sortBtn.addEventListener("click", () => {
+      sortDir = sortCol === i ? (sortDir === "asc" ? "desc" : "asc") : "asc";
+      sortCol = i;
+      updateSortIndicators();
+      render();
+    });
+    sortButtons.push(sortBtn);
+    th.append(details, sortBtn);
     return th;
   }));
+  updateSortIndicators();
+}
+function updateSortIndicators() {
+  sortButtons.forEach((btn, i) => {
+    const active = i === sortCol;
+    btn.classList.toggle("active", active);
+    btn.textContent = active ? (sortDir === "asc" ? "▴" : "▾") : "⇅";
+  });
+}
+function sortedFindings() {
+  if (sortCol == null) return findings;
+  const keyFn = SORT_KEYS[sortCol];
+  const dir = sortDir === "asc" ? 1 : -1;
+  return findings.slice().sort((a, b) => {
+    const av = keyFn(a), bv = keyFn(b);
+    if (av < bv) return -dir;
+    if (av > bv) return dir;
+    return 0;
+  });
 }
 function fill(select, options, blank) {
   select.replaceChildren();
@@ -269,7 +318,7 @@ function render() {
       const d = el("div", "", "stat"); d.append(el("b", String(v)), el("span", label, "muted")); return d;
     }));
   $("empty").hidden = findings.length > 0;
-  $("rows").replaceChildren(...findings.map((f) => {
+  $("rows").replaceChildren(...sortedFindings().map((f) => {
     const tr = document.createElement("tr");
     if (selected && selected.id === f.id) tr.className = "sel";
     tr.append(el("td", f.id), el("td", f.title), el("td", f.category || "-"),
