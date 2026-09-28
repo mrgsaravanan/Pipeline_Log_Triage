@@ -426,3 +426,21 @@ below). Neither fixture is tracked in git - both fall under the repo's
   with no `Depends(current_user)` - total runs, total findings, a category
   breakdown, and MTTR, never finding titles, evidence, team names, or
   assignees. Every other workflow route stays behind the session cookie.
+
+## Azure Data Factory integration
+
+[`adf.py`](adf.py) triages failed ADF pipeline runs through the same path as any log
+(`run_triage` -> history/Postgres -> routing). Two triggers:
+
+- **Poll**: `python adf.py --hours 24` queries `queryPipelineRuns` for Failed runs,
+  pulls each run's failed activity errors, and triages runs not yet in `.adf_seen.json`.
+  Set `ADF_SUBSCRIPTION_ID`, `ADF_RESOURCE_GROUP`, `ADF_FACTORY_NAME`; auth is
+  `ADF_ACCESS_TOKEN` or `az login` (no secrets in the repo). Schedule it with cron.
+- **Push**: `POST /api/adf/webhook` on `local_server.py`, guarded by `ADF_WEBHOOK_SECRET`
+  (header `X-ADF-Secret`). In ADF add a Web activity on the pipeline's *Failure* path with
+  body `{"pipelineName":"@{pipeline().Pipeline}","runId":"@{pipeline().RunId}",
+  "message":"@{activity('<name>').error.message}","errorCode":"@{activity('<name>').error.errorCode}"}`.
+  The server needs a public URL (e.g. a tunnel) since ADF cannot reach localhost.
+
+Limitations: polling has no cross-process lock; the webhook triages synchronously (a slow
+Claude call can exceed ADF's Web activity timeout); no tests hit real Azure.

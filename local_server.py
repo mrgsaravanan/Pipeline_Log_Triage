@@ -14,12 +14,13 @@ TRIAGE_ALLOWED_ORIGINS="https://your-app.vercel.app" (comma-separated).
 
 import base64
 import binascii
+import hmac
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # This server exists to use the subscription; never fall through to the API.
 os.environ["TRIAGE_BACKEND"] = "cli"
 
+import adf  # noqa: E402
 from Triage import (  # noqa: E402
     MAX_IMAGE_BYTES,
     ClaudeCliError,
@@ -105,6 +107,40 @@ def triage(req: TriageRequest) -> dict:
 
     _append_history(req.name, result)
     return result.model_dump()
+
+
+class AdfWebhook(BaseModel):
+    """Body sent by an ADF Web activity on a pipeline's Failure path."""
+    pipelineName: str = ""
+    runId: str = ""
+    message: str = ""
+    errorCode: str = ""
+
+
+@app.post("/api/adf/webhook")
+def adf_webhook(req: AdfWebhook, x_adf_secret: str = Header(default="")) -> dict:
+    secret = os.environ.get("ADF_WEBHOOK_SECRET", "")
+    if not secret or not hmac.compare_digest(x_adf_secret, secret):
+        raise HTTPException(401, "bad or missing X-ADF-Secret")
+    if not req.runId:
+        raise HTTPException(400, "runId is required")
+    run = {"pipelineName": req.pipelineName, "runId": req.runId, "status": "Failed",
+           "message": f"{req.errorCode}: {req.message}".strip(": ")}
+    try:
+        activities = adf.fetch_activity_runs(req.runId)
+    except adf.AdfError:
+        activities = []  # factory not configured here: triage the webhook's own error text
+    try:
+        result = adf.triage_run(run, activities)
+    except FileNotFoundError:
+        raise HTTPException(
+            502, "claude CLI not found - install it and run `claude login`"
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "claude CLI timed out") from None
+    except ClaudeCliError as e:
+        raise HTTPException(502, f"Triage failed: {e}") from e
+    return {"failures": len(result.failures)}
 
 
 app.include_router(workflow_router)
