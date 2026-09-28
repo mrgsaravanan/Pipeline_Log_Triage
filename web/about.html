@@ -54,14 +54,21 @@
 </ol>
 <h3>3. Let failures arrive automatically</h3>
 <p>Azure Data Factory pipelines and CI jobs can send failures in without anyone pasting
-  a log - see the integrations below.</p>
+  a log - see the integrations below. For ADF failures that are waiting in the queue, open
+  the <a href="dashboard.html">Workflow dashboard</a> and click <b>Run ADF drain</b>; the
+  counter beside it shows how many are queued, and the new findings appear in the table
+  when it finishes.</p>
 
 <h2>Integrations</h2>
 <ul>
   <li><b>Azure Data Factory.</b> Failed pipeline runs are pulled from the factory
     (<code>python adf.py</code>) or pushed by a Web activity on the pipeline's Failure path
     to <code>/api/adf/webhook</code>. On Vercel the webhook queues the failure in Postgres
-    and <code>python adf.py --drain</code> triages the queue on the owner's machine.</li>
+    and the queue is then triaged with <code>python adf.py --drain</code> on the owner's
+    machine <b>or with the dashboard's <b>Run ADF drain</b> button</b>: signed-in users see
+    how many ADF failures are queued, and one click starts triage in the background on the
+    Azure server (which holds the Claude login). The page shows progress and refreshes the
+    findings when the queue is empty.</li>
   <li><b>Claude</b> through the <code>claude</code> CLI (the owner's subscription) for
     triage - no billed API key.</li>
   <li><b>Postgres (Neon).</b> Every run and finding, its status history and cost live in
