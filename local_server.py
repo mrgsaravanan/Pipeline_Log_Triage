@@ -14,7 +14,6 @@ TRIAGE_ALLOWED_ORIGINS="https://your-app.vercel.app" (comma-separated).
 
 import base64
 import binascii
-import hmac
 import os
 import subprocess
 import sys
@@ -119,19 +118,12 @@ class AdfWebhook(BaseModel):
 
 @app.post("/api/adf/webhook")
 def adf_webhook(req: AdfWebhook, x_adf_secret: str = Header(default="")) -> dict:
-    secret = os.environ.get("ADF_WEBHOOK_SECRET", "")
-    if not secret or not hmac.compare_digest(x_adf_secret, secret):
+    if not adf.secret_ok(x_adf_secret):
         raise HTTPException(401, "bad or missing X-ADF-Secret")
     if not req.runId:
         raise HTTPException(400, "runId is required")
-    run = {"pipelineName": req.pipelineName, "runId": req.runId, "status": "Failed",
-           "message": f"{req.errorCode}: {req.message}".strip(": ")}
     try:
-        activities = adf.fetch_activity_runs(req.runId)
-    except adf.AdfError:
-        activities = []  # factory not configured here: triage the webhook's own error text
-    try:
-        result = adf.triage_run(run, activities)
+        result = adf.triage_webhook(req.pipelineName, req.runId, req.message, req.errorCode)
     except FileNotFoundError:
         raise HTTPException(
             502, "claude CLI not found - install it and run `claude login`"

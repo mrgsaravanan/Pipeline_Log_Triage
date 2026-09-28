@@ -54,3 +54,27 @@ def test_webhook_triages_with_valid_secret(monkeypatch):
 
 def test_webhook_rejects_bad_secret(monkeypatch):
     assert _webhook(monkeypatch, secret="nope").status_code == 401
+
+
+def test_azure_app_webhook_and_poll(monkeypatch):
+    from azure_app import main
+    monkeypatch.setenv("ADF_WEBHOOK_SECRET", "s3")
+    monkeypatch.setattr(adf, "triage_webhook", lambda *a: Triage(
+        failures=[Failure(failure_type="t", what_broke="w", evidence="e", next_step="n")],
+        notes="ok"))
+    monkeypatch.setattr(adf, "poll", lambda hours: ["r1", "r2"])
+    c = TestClient(main.app)
+    h = {"X-ADF-Secret": "s3"}
+    hook = c.post("/api/adf/webhook", json={"runId": "r1"}, headers=h)
+    assert hook.json() == {"failures": 1}
+    assert c.post("/api/adf/webhook", json={"runId": "r1"}).status_code == 401
+    assert c.post("/api/adf/poll", headers=h).json() == {"triaged": 2, "run_ids": ["r1", "r2"]}
+    assert c.post("/api/adf/poll").status_code == 401
+
+
+def test_managed_identity_token_used_when_present(monkeypatch):
+    monkeypatch.delenv("ADF_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("IDENTITY_ENDPOINT", "http://x")
+    monkeypatch.setenv("IDENTITY_HEADER", "h")
+    monkeypatch.setattr(adf, "_managed_identity_token", lambda: "mi-token")
+    assert adf._token() == "mi-token"

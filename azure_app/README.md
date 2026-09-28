@@ -128,3 +128,24 @@ Then visit `https://<your-app-name>.azurewebsites.net`.
   call per request has no natural cost/abuse ceiling.
 - The `claude` CLI install step in the Dockerfile is unverified (see above)
   - budget time for fixing the install command on first deploy.
+
+## Azure Data Factory endpoints
+
+The container also exposes the ADF integration from [`../adf.py`](../adf.py)
+(see DESIGN.md's "Azure Data Factory integration"). Both need `ADF_WEBHOOK_SECRET`
+set as an App Service application setting and sent in the `X-ADF-Secret` header.
+
+- `POST /api/adf/webhook` - point an ADF Web activity on the pipeline's Failure path
+  at `https://<app>.azurewebsites.net/api/adf/webhook`.
+- `POST /api/adf/poll?hours=24` - triages failed runs not seen before; call it on a
+  schedule (Logic App recurrence, cron). Only `hours` up to 168 is honored.
+
+To let the container read the factory, set `ADF_SUBSCRIPTION_ID`, `ADF_RESOURCE_GROUP`,
+`ADF_FACTORY_NAME`, enable the App Service **system-assigned managed identity**, and grant
+it the *Data Factory Contributor* role (or a custom role with
+`Microsoft.DataFactory/factories/querypipelineruns/action` and
+`.../pipelineruns/queryactivityruns/action`) on the factory. No secret is stored.
+
+Limitations: the "already triaged" list (`.adf_seen.json`) lives on the container's
+ephemeral disk, so a restart can re-triage recent runs; the webhook and poll calls run
+synchronously and can exceed ADF's Web activity timeout if Claude is slow.

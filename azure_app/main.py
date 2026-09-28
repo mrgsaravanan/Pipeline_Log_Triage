@@ -28,6 +28,7 @@ from pydantic import BaseModel
 # Reuse Triage.py from the repo root - same pattern tests/test_triage.py uses.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import adf  # noqa: E402
 from Triage import (
     MAX_IMAGE_BYTES,
     ClaudeCliError,
@@ -296,6 +297,49 @@ def api_triage(req: TriageRequest, x_access_code: str = Header(default=""),
         raise HTTPException(502, f"Triage failed: {e}") from e
     _append_history(req.name, result)
     return result.model_dump()
+
+
+class AdfWebhook(BaseModel):
+    """Body sent by an ADF Web activity on a pipeline's Failure path."""
+    pipelineName: str = ""
+    runId: str = ""
+    message: str = ""
+    errorCode: str = ""
+
+
+def _adf_call(fn, *args):
+    """Run an ADF triage action, mapping its failures to HTTP errors."""
+    try:
+        return fn(*args)
+    except adf.AdfError as e:
+        raise HTTPException(502, f"ADF: {e}") from e
+    except FileNotFoundError:
+        raise HTTPException(502, "claude CLI not found in this container") from None
+    except subprocess.TimeoutExpired:
+        raise HTTPException(504, "claude CLI timed out") from None
+    except ClaudeCliError as e:
+        raise HTTPException(502, f"Triage failed: {e}") from e
+
+
+@app.post("/api/adf/webhook")
+def adf_webhook(req: AdfWebhook, x_adf_secret: str = Header(default="")) -> dict:
+    """Called by an ADF Web activity on the pipeline's Failure path."""
+    if not adf.secret_ok(x_adf_secret):
+        raise HTTPException(401, "bad or missing X-ADF-Secret")
+    if not req.runId:
+        raise HTTPException(400, "runId is required")
+    result = _adf_call(adf.triage_webhook, req.pipelineName, req.runId, req.message,
+                       req.errorCode)
+    return {"failures": len(result.failures)}
+
+
+@app.post("/api/adf/poll")
+def adf_poll(hours: float = 24, x_adf_secret: str = Header(default="")) -> dict:
+    """Triage failed ADF runs not seen before; hit this on a timer (Logic App, cron)."""
+    if not adf.secret_ok(x_adf_secret):
+        raise HTTPException(401, "bad or missing X-ADF-Secret")
+    done = _adf_call(adf.poll, min(max(hours, 0.1), 24 * 7))
+    return {"triaged": len(done), "run_ids": done}
 
 
 @app.get("/health")

@@ -9,7 +9,9 @@ Two entry points feed the same path (ADF run -> log text -> Triage -> history/DB
 Configuration (environment variables):
   ADF_SUBSCRIPTION_ID, ADF_RESOURCE_GROUP, ADF_FACTORY_NAME   the factory to read
   ADF_ACCESS_TOKEN     optional bearer token for management.azure.com; when unset
-                       the token comes from `az account get-access-token`
+                       the token comes from the App Service managed identity
+                       (IDENTITY_ENDPOINT, grant it "Data Factory Contributor"/Reader
+                       on the factory) or else `az account get-access-token`
                        (run `az login` once - no secrets stored in this repo)
   ADF_WEBHOOK_SECRET   shared secret the webhook requires in X-ADF-Secret
 
@@ -18,6 +20,7 @@ re-polling never spends the subscription twice on the same run.
 """
 
 import argparse
+import hmac
 import json
 import os
 import subprocess
@@ -48,6 +51,8 @@ def _factory_base() -> str:
 def _token() -> str:
     if os.environ.get("ADF_ACCESS_TOKEN"):
         return os.environ["ADF_ACCESS_TOKEN"]
+    if os.environ.get("IDENTITY_ENDPOINT") and os.environ.get("IDENTITY_HEADER"):
+        return _managed_identity_token()
     try:
         out = subprocess.run(
             ["az", "account", "get-access-token", "--resource", MGMT,
@@ -56,6 +61,17 @@ def _token() -> str:
     except (FileNotFoundError, subprocess.SubprocessError) as e:
         raise AdfError("no Azure token: set ADF_ACCESS_TOKEN or run `az login`") from e
     return out.stdout.strip()
+
+
+def _managed_identity_token() -> str:
+    req = urllib.request.Request(
+        f"{os.environ['IDENTITY_ENDPOINT']}?resource={MGMT}&api-version=2019-08-01",
+        headers={"X-IDENTITY-HEADER": os.environ["IDENTITY_HEADER"]})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 - platform endpoint
+            return json.load(resp)["access_token"]
+    except (OSError, KeyError, ValueError) as e:
+        raise AdfError(f"managed identity token request failed: {e}") from e
 
 
 def _post(url: str, body: dict) -> dict:
@@ -140,9 +156,10 @@ def triage_run(run: dict, activities: list[dict] | None = None):
     return result
 
 
-def poll(hours: float = 24) -> int:
+def poll(hours: float = 24) -> list[str]:
+    """Triage every not-yet-seen failed run in the window; returns the run ids done."""
     seen = _load_seen()
-    done = 0
+    done = []
     for run in fetch_failed_runs(hours):
         run_id = run.get("runId")
         if not run_id or run_id in seen:
@@ -150,10 +167,26 @@ def poll(hours: float = 24) -> int:
         triage_run(run, fetch_activity_runs(run_id))
         seen.add(run_id)
         _save_seen(seen)
-        done += 1
+        done.append(run_id)
         print(f"triaged {run.get('pipelineName')} {run_id}")
-    print(f"{done} new failed run(s) triaged")
-    return 0
+    return done
+
+
+def secret_ok(provided: str) -> bool:
+    """Constant-time check of X-ADF-Secret; always False when no secret is configured."""
+    secret = os.environ.get("ADF_WEBHOOK_SECRET", "")
+    return bool(secret) and hmac.compare_digest(provided.encode(), secret.encode())
+
+
+def triage_webhook(pipeline: str, run_id: str, message: str = "", error_code: str = ""):
+    """Triage a failure reported by an ADF Web activity, enriching it from ADF if possible."""
+    run = {"pipelineName": pipeline, "runId": run_id, "status": "Failed",
+           "message": f"{error_code}: {message}".strip(": ")}
+    try:
+        activities = fetch_activity_runs(run_id)
+    except AdfError:
+        activities = []  # factory not configured here: triage the webhook's own error text
+    return triage_run(run, activities)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -161,7 +194,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hours", type=float, default=24, help="look-back window (default 24)")
     args = ap.parse_args(argv)
     try:
-        return poll(args.hours)
+        print(f"{len(poll(args.hours))} new failed run(s) triaged")
+        return 0
     except AdfError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
