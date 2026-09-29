@@ -82,6 +82,7 @@ KNOWN_FAILURES = [
     {
         "id": "s3-access-denied",
         "title": "S3 / object storage permission denied",
+        "category": "permissions",
         "text": (
             "A task cannot read or write an object in cloud storage: AccessDenied, "
             "403 Forbidden, botocore ClientError on GetObject or PutObject. Usually "
@@ -93,6 +94,7 @@ KNOWN_FAILURES = [
     {
         "id": "schema-drift-missing-column",
         "title": "Upstream schema drift (missing or renamed column)",
+        "category": "schema_drift",
         "text": (
             "A transform fails with KeyError, column not found, or invalid column "
             "name because an upstream table or file dropped, renamed, or retyped a "
@@ -103,6 +105,7 @@ KNOWN_FAILURES = [
     {
         "id": "out-of-memory",
         "title": "Out of memory in a transform",
+        "category": "infra",
         "text": (
             "MemoryError, OutOfMemoryError, or unable to allocate N GiB for an "
             "array. A join, cross product, or full-data load is far larger than "
@@ -113,6 +116,7 @@ KNOWN_FAILURES = [
     {
         "id": "connection-timeout",
         "title": "Database or service connection timeout",
+        "category": "infra",
         "text": (
             "Connection refused, connection timed out, could not connect to server, "
             "or network unreachable while opening a source or sink. The database "
@@ -123,6 +127,7 @@ KNOWN_FAILURES = [
     {
         "id": "data-quality-rejects",
         "title": "Data quality: rows rejected for invalid values",
+        "category": "data_quality",
         "text": (
             "A stage logs N rows rejected, invalid value for column, or failed "
             "validation, while the job still finishes. Malformed emails, dates, or "
@@ -132,17 +137,22 @@ KNOWN_FAILURES = [
     },
     {
         "id": "missing-input-file",
-        "title": "Expected input file or partition missing",
+        "title": "Expected input file, partition, or source table missing",
+        "category": "schema_drift",
         "text": (
-            "File not found, no such key, path does not exist, or zero rows for the "
-            "run date. The upstream job has not delivered its output yet or wrote "
-            "to a different path. Check the producer's schedule and output "
-            "location; add a wait or dependency."
+            "File not found, no such key, path does not exist, zero rows for the "
+            "run date, or a source table that does not exist in its schema. The "
+            "upstream job has not delivered its output yet, wrote to a different "
+            "path, or the table/partition was dropped or renamed upstream - the "
+            "same category of failure as a dropped column, just at the level of a "
+            "whole table or file. Check the producer's schedule, output location, "
+            "and upstream schema; add a wait or dependency, or restore the table."
         ),
     },
     {
         "id": "credential-expired",
         "title": "Expired or invalid credentials",
+        "category": "permissions",
         "text": (
             "401 Unauthorized, authentication failed, token expired, invalid client "
             "secret, or login failed for user. A service principal secret, password, "
@@ -153,6 +163,7 @@ KNOWN_FAILURES = [
     {
         "id": "disk-full",
         "title": "Disk or storage full",
+        "category": "infra",
         "text": (
             "No space left on device, disk quota exceeded, or failed to write "
             "temporary or spill files. The worker's local disk or a staging area "
@@ -162,6 +173,7 @@ KNOWN_FAILURES = [
     {
         "id": "serialization-schema-mismatch",
         "title": "Serialization / schema registry mismatch (Avro, Protobuf)",
+        "category": "schema_drift",
         "text": (
             "SchemaResolutionError, deserialization failed, or reader schema is "
             "missing a field from the writer schema on a stream or topic. Producer "
@@ -172,6 +184,7 @@ KNOWN_FAILURES = [
     {
         "id": "type-conversion",
         "title": "Type conversion error on bad numeric data",
+        "category": "data_quality",
         "text": (
             "ValueError: could not convert string to float, invalid literal for "
             "int, or cast failure, often from a placeholder such as N/A, empty "
@@ -182,6 +195,7 @@ KNOWN_FAILURES = [
     {
         "id": "throttling",
         "title": "API throttling / rate limit exceeded",
+        "category": "infra",
         "text": (
             "429 Too Many Requests, rate limit exceeded, throttled, or request "
             "quota exhausted from a source API or storage account. Too many "
@@ -192,6 +206,7 @@ KNOWN_FAILURES = [
     {
         "id": "encoding-error",
         "title": "Character encoding mismatch",
+        "category": "data_quality",
         "text": (
             "UnicodeDecodeError, invalid byte sequence, or garbled characters when "
             "reading a file. The source is in a legacy encoding such as "
@@ -227,7 +242,8 @@ For each distinct failure, give:
   - "permissions" - IAM/access-denied/forbidden/credential/auth failures.
   - "infra" - out-of-memory, disk, timeout, connection refused, network,
     cluster/node failures.
-  - "schema_drift" - a changed/missing column, or a serialization format
+  - "schema_drift" - a changed/missing column, a missing/dropped/renamed
+    upstream table, file or partition, or a serialization format
     (Avro/Protobuf/JSON) mismatch.
   - "data_quality" - null/duplicate/constraint violations, bad encoding, or
     corrupt/malformed records.
@@ -505,8 +521,12 @@ def _history_cases() -> list[dict]:
                 )
             except (KeyError, TypeError):
                 continue
+            # category is whatever this same failure was routed under last time,
+            # so a genuine repeat can be told to reuse it instead of re-guessing.
+            category = failure.get("category") if isinstance(failure, dict) else None
             cases[text] = {"id": f"hist-{stamp}-{i}", "title": title, "text": text[:800],
-                           "source": "history"}
+                           "source": "history",
+                           "category": category if category in CATEGORIES else None}
     return list(cases.values())
 
 
@@ -632,23 +652,39 @@ def _retrieve_similar(queries: list[str]) -> list[dict]:
             ):
                 case = cases[row]
                 best[row] = {"title": case["title"], "text": case["text"],
-                             "source": case["source"], "distance": distance}
+                             "source": case["source"], "distance": distance,
+                             "category": case.get("category")}
     return sorted(best.values(), key=lambda c: c["distance"])[:RAG_TOP_K]
 
 
 def _format_similar_cases(similar: list[dict]) -> str:
-    """The prompt block that hands the retrieved cases to the model."""
+    """The prompt block that hands the retrieved cases to the model.
+
+    Each case's own `category` (when known) is shown alongside it and the model
+    is told to reuse it for a near-duplicate. Without this, the same real
+    failure gets a different category - and so a different `failure_signature`
+    (triage_db.py) and owning team - on every re-run, because nothing here ever
+    told the model that "source table missing" was already categorized last
+    time; it re-derives category from scratch each run and lands on a
+    different plausible-sounding bucket (infra vs schema_drift vs config).
+    """
     if not similar:
         return ""
-    entries = "\n".join(
-        f"{i}. {c['title']} (similarity {1 - c['distance']:.2f})\n   {c['text']}"
-        for i, c in enumerate(similar, start=1)
-    )
+    def _line(i: int, c: dict) -> str:
+        category = f", category: {c['category']}" if c.get("category") else ""
+        return f"{i}. {c['title']} (similarity {1 - c['distance']:.2f}{category})\n   {c['text']}"
+
+    entries = "\n".join(_line(i, c) for i, c in enumerate(similar, start=1))
     return (
         "Similar past cases from the knowledge base (found by vector search, most "
         "similar first). Use them only as background on likely causes and fixes, and "
         "only where they genuinely match this log. Do not force a match, and never "
-        "cite them as evidence - evidence must come from the log below.\n\n"
+        "cite them as evidence - evidence must come from the log below. If one of "
+        "these cases is essentially the same failure as what you are triaging now "
+        "(same broken object, same kind of error - not just a similar-sounding "
+        "phrase) and it lists a category, use that same category rather than "
+        "choosing a different one, so the same recurring failure is always routed "
+        "the same way.\n\n"
         f"{entries}"
     )
 

@@ -848,6 +848,10 @@ def test_known_failure_catalog_is_well_formed():
     ids = [c["id"] for c in Triage.KNOWN_FAILURES]
     assert len(ids) == len(set(ids)) >= 8
     assert all(c["title"].strip() and c["text"].strip() for c in Triage.KNOWN_FAILURES)
+    # Every catalog case must carry a real category so a matching retrieval can
+    # tell the model "this was categorized as X before, stay consistent" -
+    # see _format_similar_cases.
+    assert all(c["category"] in Triage.CATEGORIES for c in Triage.KNOWN_FAILURES)
 
 
 def test_query_texts_pick_error_lines_including_camelcase_exceptions():
@@ -901,13 +905,50 @@ def test_history_cases_missing_file_is_empty(monkeypatch, tmp_path):
     assert Triage._history_cases() == []
 
 
+def test_history_cases_carry_the_category_they_were_routed_under(monkeypatch, tmp_path):
+    """A repeat of the same real failure should be able to reuse its category -
+    see _format_similar_cases - which needs it plumbed through from here."""
+    history = tmp_path / "h.jsonl"
+    failure = {"failure_type": "Source table missing", "what_broke": "w", "evidence": "e",
+              "next_step": "n", "category": "schema_drift"}
+    history.write_text(json.dumps({"timestamp": "T1", "triage": {"failures": [failure]}}) + "\n")
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(history))
+
+    assert Triage._history_cases()[0]["category"] == "schema_drift"
+
+
+def test_history_cases_drop_an_unknown_or_missing_category(monkeypatch, tmp_path):
+    history = tmp_path / "h.jsonl"
+    with_bad_category = {"failure_type": "A", "what_broke": "w", "evidence": "e",
+                         "next_step": "n", "category": "not-a-real-category"}
+    without_category = {"failure_type": "B", "what_broke": "w2", "evidence": "e",
+                        "next_step": "n"}
+    line1 = json.dumps({"timestamp": "T1", "triage": {"failures": [with_bad_category]}})
+    line2 = json.dumps({"timestamp": "T2", "triage": {"failures": [without_category]}})
+    history.write_text(line1 + "\n" + line2 + "\n")
+    monkeypatch.setattr(Triage, "HISTORY_FILE", str(history))
+
+    cases = {c["title"]: c for c in Triage._history_cases()}
+    assert cases["Past run: A"]["category"] is None
+    assert cases["Past run: B"]["category"] is None
+
+
 def test_format_similar_cases_lists_nearest_first_with_similarity():
     block = Triage._format_similar_cases(SIMILAR)
 
     assert block.index("Out of memory") < block.index("S3 access denied")
     assert "similarity 0.70" in block and "similarity 0.55" in block
     assert "never cite them as evidence" in block
+    assert "category:" not in block  # SIMILAR carries no category - nothing to show
     assert Triage._format_similar_cases([]) == ""
+
+
+def test_format_similar_cases_shows_category_and_tells_model_to_reuse_it():
+    with_category = [{**SIMILAR[0], "category": "infra"}]
+    block = Triage._format_similar_cases(with_category)
+
+    assert "category: infra" in block
+    assert "use that same category" in block
 
 
 def test_api_prompt_includes_retrieved_cases_before_the_log(monkeypatch):
