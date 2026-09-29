@@ -1,0 +1,6 @@
+# Optional, LOCAL-ONLY extra for mcp_server.py (an MCP server exposing this
+# project to an MCP client such as Claude Code or Claude Desktop).
+# Deliberately NOT in requirements.txt / pyproject.toml: Vercel and the Azure
+# app never run this. Install with:
+#   pip install -r requirements-mcp.txt
+mcp>=1.0.0

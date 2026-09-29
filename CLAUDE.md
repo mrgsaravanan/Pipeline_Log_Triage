@@ -97,6 +97,19 @@ figures from `GET /api/public-stats`, the one workflow route that skips login).
 owner's machine and triages via the `claude` CLI (Claude subscription, no API
 key). Vercel itself never calls Claude. See [VERCEL.md](VERCEL.md).
 
+## MCP server
+
+[`mcp_server.py`](mcp_server.py) exposes this project to an MCP client (Claude
+Code, Claude Desktop) as four tools: `triage_log` (same `claude` CLI/subscription
+path as `Triage.py`, appended to history and Postgres the same way), plus
+read-only `list_findings`/`get_finding`/`get_trends` against the workflow
+dashboard's Postgres. Runs entirely locally, same trust model as
+`local_server.py`/`adf.py` - no login of its own, since an MCP client only
+reaches it already running on this machine. Install with
+`pip install -r requirements-mcp.txt` (kept out of `requirements.txt`, like
+`requirements-rag.txt`/`requirements-db.txt`), then e.g.
+`claude mcp add pipeline-log-triage -- /path/to/.venv/bin/python /path/to/mcp_server.py`.
+
 ## Working conventions for Claude Code in this repo
 
 - After any change, run `./scripts/build.sh` before considering the change
