@@ -23,8 +23,30 @@ Then add it to your MCP client's config, e.g. for Claude Code:
 The findings/trends tools are a no-op-with-a-clear-error when DATABASE_URL
 isn't set (see DESIGN.md's "Postgres workflow" section) - triage_log itself
 never needs it.
+
+Remote / network mode
+----------------------
+By default this runs over stdio: the trust boundary is "whatever started this
+process already runs on this machine." `--transport http` instead serves it
+over the network for a remote MCP client (e.g. a teammate's machine, or a
+different host) to connect to - but every call to triage_log spends *your*
+Claude subscription, and the findings tools return real triage data with no
+login of their own, so this mode is gated behind a shared bearer token that
+MUST be set first:
+
+    export MCP_SERVER_TOKEN=$(python -c "import secrets; print(secrets.token_hex(32))")
+    python mcp_server.py --transport http --host 0.0.0.0 --port 8765
+
+A remote client then connects to http://<this-machine>:8765/mcp with header
+`Authorization: Bearer <the same MCP_SERVER_TOKEN value>`. The server refuses
+to start in http mode without MCP_SERVER_TOKEN set. Keep --host at its default
+(127.0.0.1) unless you specifically need another machine to reach it; binding
+0.0.0.0 (or a LAN/public IP) exposes it to anyone who can reach that address
+and knows or guesses the token, so use a long random token, not a short or
+guessable one, and treat it like any other credential (never commit it).
 """
 
+import hmac
 import os
 import subprocess
 import sys
@@ -147,5 +169,66 @@ def get_trends() -> dict:
         return triage_db.trends(conn)
 
 
+def _bearer_token_guard(app, token: str):
+    """Wrap an ASGI app so every request needs `Authorization: Bearer <token>`.
+
+    A plain shared-secret check - the same pattern as adf.secret_ok's
+    X-ADF-Secret, not the mcp SDK's full OAuth support (issuer/JWKS/client
+    registration), which is far more machinery than "don't let strangers on
+    the network use this" needs. Constant-time comparison so response timing
+    can't be used to guess the token one byte at a time.
+    """
+    from starlette.responses import JSONResponse
+
+    async def guarded(scope, receive, send):
+        if scope["type"] != "http":
+            return await app(scope, receive, send)
+        headers = dict(scope["headers"])
+        auth = headers.get(b"authorization", b"").decode("latin-1")
+        provided = auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
+        if not hmac.compare_digest(provided, token):
+            response = JSONResponse({"error": "bad or missing bearer token"}, status_code=401)
+            return await response(scope, receive, send)
+        return await app(scope, receive, send)
+
+    return guarded
+
+
+def _run_http(host: str, port: int) -> None:
+    """Serve over HTTP for a remote MCP client - see this module's docstring
+    for the security tradeoff. Refuses to start without MCP_SERVER_TOKEN."""
+    token = os.environ.get("MCP_SERVER_TOKEN", "")
+    if not token:
+        print(
+            "error: MCP_SERVER_TOKEN must be set to serve over --transport http "
+            '(e.g. export MCP_SERVER_TOKEN=$(python -c "import secrets; '
+            'print(secrets.token_hex(32))")) - see mcp_server.py\'s module docstring',
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"warning: binding to {host} exposes this server to more than just this "
+              "machine - make sure that is intended and MCP_SERVER_TOKEN is a long, "
+              "random value.", file=sys.stderr)
+
+    import uvicorn
+
+    app = _bearer_token_guard(mcp.streamable_http_app(), token)
+    uvicorn.run(app, host=host, port=port)
+
+
 if __name__ == "__main__":
-    mcp.run()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--transport", choices=["stdio", "http"], default="stdio",
+                        help="stdio (default): a local MCP client starts this process "
+                             "itself. http: serve over the network - see module docstring.")
+    parser.add_argument("--host", default="127.0.0.1", help="--transport http only")
+    parser.add_argument("--port", type=int, default=8765, help="--transport http only")
+    args = parser.parse_args()
+
+    if args.transport == "stdio":
+        mcp.run()
+    else:
+        _run_http(args.host, args.port)

@@ -110,6 +110,13 @@ reaches it already running on this machine. Install with
 `requirements-rag.txt`/`requirements-db.txt`), then e.g.
 `claude mcp add pipeline-log-triage -- /path/to/.venv/bin/python /path/to/mcp_server.py`.
 
+For a remote MCP client, `python mcp_server.py --transport http --host 0.0.0.0
+--port 8765` serves it over the network instead of stdio - gated behind a
+required `MCP_SERVER_TOKEN` bearer token (the server refuses to start without
+one), since a network-reachable `triage_log` spends your Claude subscription
+and the findings tools have no login of their own. See `mcp_server.py`'s
+module docstring for the full security tradeoff before using this mode.
+
 ## Working conventions for Claude Code in this repo
 
 - After any change, run `./scripts/build.sh` before considering the change

@@ -111,3 +111,51 @@ def test_findings_tools_error_clearly_without_database_url():
     assert "DATABASE_URL" in mcp_server.list_findings()["error"]
     assert "DATABASE_URL" in mcp_server.get_finding(1)["error"]
     assert "DATABASE_URL" in mcp_server.get_trends()["error"]
+
+
+# --- network mode (--transport http): refuses without a token, gates every request
+
+def test_run_http_refuses_to_start_without_a_token(monkeypatch):
+    monkeypatch.delenv("MCP_SERVER_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        mcp_server._run_http("127.0.0.1", 8765)
+
+
+async def _send(app, headers):
+    """Minimal ASGI call: capture only the response's status code."""
+    status = {}
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            status["code"] = message["status"]
+
+    scope = {"type": "http", "method": "POST", "path": "/mcp", "headers": headers,
+             "query_string": b""}
+    await app(scope, receive, send)
+    return status["code"]
+
+
+def test_bearer_token_guard_rejects_missing_and_wrong_tokens():
+    import asyncio
+
+    async def inner_app(scope, receive, send):
+        raise AssertionError("must never reach the real app without a valid token")
+
+    guarded = mcp_server._bearer_token_guard(inner_app, "right-token")
+
+    assert asyncio.run(_send(guarded, [])) == 401
+    assert asyncio.run(_send(guarded, [(b"authorization", b"Bearer wrong-token")])) == 401
+
+
+def test_bearer_token_guard_admits_the_correct_token():
+    import asyncio
+
+    async def inner_app(scope, receive, send):
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+
+    guarded = mcp_server._bearer_token_guard(inner_app, "right-token")
+
+    assert asyncio.run(_send(guarded, [(b"authorization", b"Bearer right-token")])) == 204
