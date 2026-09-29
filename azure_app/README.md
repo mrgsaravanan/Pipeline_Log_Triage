@@ -29,45 +29,67 @@ chat history that led here.
 
 ## Credential handling - what actually happens, and why
 
-The `claude` CLI needs its account credential file (`~/.claude.json` on your
-Mac) to authenticate. That file is **never** committed to git, **never**
-baked into the Docker image (image layers sit in a container registry
-indefinitely, so anything COPYed in would too), and **never** typed into
-this chat / handled by Claude Code directly. Instead:
+The `claude` CLI needs a credential to authenticate. That credential is
+**never** committed to git, **never** baked into the Docker image (image
+layers sit in a container registry indefinitely, so anything COPYed in would
+too), and **never** typed into this chat / handled by Claude Code directly.
 
-1. **You** encode it yourself, locally, and copy the result straight to your
-   clipboard - it never touches this terminal's output or gets read into
-   any conversation:
+**Preferred: `CLAUDE_CODE_OAUTH_TOKEN`** (a long-lived, ~1-year token, separate
+from your regular desktop login):
+
+1. **You** run this locally and follow its prompts - the token it prints is
+   shown only once and should go straight into your own clipboard/password
+   manager, never pasted into a chat:
 
    ```bash
-   base64 -i ~/.claude.json | pbcopy
+   claude setup-token
    ```
 
-2. **You** paste that value into the Azure Portal yourself (Web App ->
-   Configuration -> Application settings -> New application setting), as an
-   app setting named `CLAUDE_CREDENTIALS_B64`. Or via the CLI, still without
-   it ever landing in a file or a chat message:
+2. **You** set it as an Azure App Setting yourself:
 
    ```bash
    az webapp config appsettings set \
      --resource-group <your-resource-group> \
      --name <your-app-name> \
-     --settings CLAUDE_CREDENTIALS_B64="$(base64 -i ~/.claude.json)"
+     --settings CLAUDE_CODE_OAUTH_TOKEN="<the token>"
    ```
 
-3. At container **startup** (not build time), `docker-entrypoint.sh` reads
-   that app setting, base64-decodes it, and writes `/root/.claude.json`
-   inside the running container - then launches the app. Restarting or
-   redeploying the container re-runs this step; the raw file only ever
-   exists in the running container's ephemeral filesystem, never in the
-   image itself.
+3. `docker-entrypoint.sh` needs to do nothing for this one - it's already an
+   environment variable, and the exec'd process inherits it directly; the
+   `claude` CLI reads it on its own.
 
-This is still a real tradeoff: a personal Claude subscription credential now
-lives in an Azure App Setting (visible to anyone with Contributor+ access to
-this Web App in the Portal/CLI/ARM export). That's a deliberate choice made
-after discussing the alternative (a billed `ANTHROPIC_API_KEY`, which has
-the same "lives in Azure config" exposure but is a scoped, revocable API
-key rather than a personal account session).
+This works no matter how your local `claude` was installed. It matters
+because a **native-binary** install (as opposed to the npm package) commonly
+keeps its regular login in the OS keychain, not in a portable file at all -
+so the fallback below silently produces a credential file with no usable
+token in it, on a machine set up that way.
+
+**Fallback: `CLAUDE_CREDENTIALS_B64`** (only if your local `claude` is the npm
+package, and stores its login in `~/.claude.json` itself):
+
+```bash
+az webapp config appsettings set \
+  --resource-group <your-resource-group> \
+  --name <your-app-name> \
+  --settings CLAUDE_CREDENTIALS_B64="$(base64 -i ~/.claude.json)"
+```
+
+At container **startup** (not build time), `docker-entrypoint.sh` reads that
+app setting, base64-decodes it, and writes `/root/.claude.json` inside the
+running container - then launches the app. Restarting or redeploying the
+container re-runs this step; the raw file only ever exists in the running
+container's ephemeral filesystem, never in the image itself. Two known
+failure modes: Azure App Service has an app-setting size limit, and a real
+`~/.claude.json` accumulates a lot of unrelated local cache (tens of KB) on
+top of the actual login, which can exceed it; and, as above, this only
+contains a usable credential at all if your `claude` install stores its login
+in that file in the first place.
+
+Either way, this is still a real tradeoff: a Claude credential now lives in
+an Azure App Setting (visible to anyone with Contributor+ access to this Web
+App in the Portal/CLI/ARM export). `CLAUDE_CODE_OAUTH_TOKEN` at least keeps
+that separate from and revocable independently of your everyday desktop
+login, unlike a copy of the login file itself.
 
 ## Deploy steps
 
