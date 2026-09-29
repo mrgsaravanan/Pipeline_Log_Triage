@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "defaultValue": "az-ins-df"
+    }
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/NeonPostgres')]",
+      "type": "Microsoft.DataFactory/factories/linkedServices",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "annotations": [],
+        "type": "AzurePostgreSql",
+        "typeProperties": {
+          "connectionString": {
+            "type": "AzureKeyVaultSecret",
+            "store": {
+              "referenceName": "AzureKeyVault",
+              "type": "LinkedServiceReference"
+            },
+            "secretName": "NeonConnectionString"
+          }
+        }
+      }
+    }
+  ]
+}

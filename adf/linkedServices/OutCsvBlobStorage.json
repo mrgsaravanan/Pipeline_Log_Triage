@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "defaultValue": "az-ins-df"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "metadata": "Key Vault holding the StorageConnectionString secret",
+      "defaultValue": "az-triage-kv"
+    }
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/OutCsvBlobStorage')]",
+      "type": "Microsoft.DataFactory/factories/linkedServices",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "annotations": [],
+        "type": "AzureBlobStorage",
+        "typeProperties": {
+          "connectionString": {
+            "type": "AzureKeyVaultSecret",
+            "store": {
+              "referenceName": "AzureKeyVault",
+              "type": "LinkedServiceReference"
+            },
+            "secretName": "StorageConnectionString"
+          }
+        }
+      }
+    }
+  ]
+}

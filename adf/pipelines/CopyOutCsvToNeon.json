@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "defaultValue": "az-ins-df"
+    }
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/CopyOutCsvToNeon')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "annotations": [],
+        "activities": [
+          {
+            "name": "CopyOutCsvToNeon",
+            "type": "Copy",
+            "typeProperties": {
+              "source": {
+                "type": "DelimitedTextSource",
+                "storeSettings": {
+                  "type": "AzureBlobStorageReadSettings",
+                  "recursive": false
+                },
+                "formatSettings": {
+                  "type": "DelimitedTextReadSettings"
+                }
+              },
+              "sink": {
+                "type": "AzurePostgreSqlSink",
+                "tableOption": "autoCreate",
+                "writeBehavior": "insert"
+              },
+              "enableStaging": false,
+              "translator": {
+                "type": "TabularTranslator",
+                "typeConversion": true,
+                "typeConversionSettings": {
+                  "allowDataTruncation": true,
+                  "treatBooleanAsNumber": false
+                }
+              }
+            },
+            "inputs": [
+              {
+                "referenceName": "OutCsvDataset",
+                "type": "DatasetReference"
+              }
+            ],
+            "outputs": [
+              {
+                "referenceName": "OutCsvDataTable",
+                "type": "DatasetReference"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

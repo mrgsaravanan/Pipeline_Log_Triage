@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "defaultValue": "az-ins-df"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "defaultValue": "az-triage-kv"
+    }
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/AzureKeyVault')]",
+      "type": "Microsoft.DataFactory/factories/linkedServices",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "annotations": [],
+        "type": "AzureKeyVault",
+        "typeProperties": {
+          "baseUrl": "[concat('https://', parameters('keyVaultName'), '.vault.azure.net/')]"
+        }
+      }
+    }
+  ]
+}
