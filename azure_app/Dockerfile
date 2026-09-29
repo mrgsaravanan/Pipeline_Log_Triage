@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir -r azure_app/requirements.txt
 COPY Triage.py ./Triage.py
 COPY triage_db.py ./triage_db.py
 COPY notify.py ./notify.py
+COPY mcp_server.py ./mcp_server.py
 COPY adf.py ./adf.py
 COPY azure_app/main.py ./azure_app/main.py
 COPY azure_app/docker-entrypoint.sh ./azure_app/docker-entrypoint.sh
