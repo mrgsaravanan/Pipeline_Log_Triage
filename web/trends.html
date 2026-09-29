@@ -83,8 +83,21 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const SVG_NS = "http://www.w3.org/2000/svg";
+const store = {
+  get(k, d) { try { return localStorage.getItem(k) || d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
 // Same server that serves this page by default.
 const BACKEND = location.protocol.startsWith("http") ? "" : "http://localhost:8000";
+
+// Pre-fill the login form for convenience: username defaults to "admin" (no
+// secret, fine to ship in the page). The password is never put in the page's
+// own source - it lives only in this browser's localStorage, written once the
+// first time this browser signs in successfully, and read back on later
+// visits. See web/dashboard.html for the same pattern.
+const DEFAULT_USER = "admin";
+const REMEMBERED_USER_KEY = "triage_dashboard_user";
+const REMEMBERED_PASS_KEY = "triage_dashboard_pass";
 
 let me = null;
 
@@ -122,13 +135,20 @@ const money = (n) => n == null ? "-" : "$" + Number(n).toFixed(0);
 function show(view) {
   $("loginView").hidden = view !== "login";
   $("appView").hidden = view !== "app";
+  if (view === "login") {
+    if (!$("user").value) $("user").value = store.get(REMEMBERED_USER_KEY, DEFAULT_USER);
+    if (!$("pass").value) $("pass").value = store.get(REMEMBERED_PASS_KEY, "");
+  }
 }
 
 async function login() {
   $("loginErr").textContent = "";
+  const username = $("user").value, password = $("pass").value;
   try {
     me = await api("/api/login", { method: "POST",
-      body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
+      body: JSON.stringify({ username, password }) });
+    store.set(REMEMBERED_USER_KEY, username);
+    store.set(REMEMBERED_PASS_KEY, password);
     $("pass").value = "";
     await start();
   } catch (e) { $("loginErr").textContent = e.message; }
