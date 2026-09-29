@@ -117,6 +117,14 @@ one), since a network-reachable `triage_log` spends your Claude subscription
 and the findings tools have no login of their own. See `mcp_server.py`'s
 module docstring for the full security tradeoff before using this mode.
 
+It's also mounted at `/mcp/` (trailing slash required - it's a sub-app mount,
+so `/mcp` alone 307-redirects there) inside [`azure_app/main.py`](azure_app/main.py),
+so the always-on Azure deployment can serve it too, permanently, without you
+running anything locally. Mounted only when `MCP_SERVER_TOKEN` is set as an
+app setting on that Azure Web App (same bearer-token gate, same tradeoff -
+`az webapp config appsettings set ... --settings MCP_SERVER_TOKEN=...`, then
+rebuild/redeploy the container as in azure_app/README.md's deploy steps).
+
 ## Working conventions for Claude Code in this repo
 
 - After any change, run `./scripts/build.sh` before considering the change

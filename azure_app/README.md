@@ -149,3 +149,27 @@ it the *Data Factory Contributor* role (or a custom role with
 Limitations: the "already triaged" list (`.adf_seen.json`) lives on the container's
 ephemeral disk, so a restart can re-triage recent runs; the webhook and poll calls run
 synchronously and can exceed ADF's Web activity timeout if Claude is slow.
+
+## MCP server endpoint
+
+The container also mounts [`../mcp_server.py`](../mcp_server.py) at `/mcp/` (trailing
+slash required - it's a sub-app mount, so `/mcp` alone 307-redirects there) when
+`MCP_SERVER_TOKEN` is set as an App Service application setting:
+
+```bash
+az webapp config appsettings set --resource-group pipeline-log-triage-rg \
+  --name <your-app-name> --settings MCP_SERVER_TOKEN="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+```
+
+then rebuild and redeploy (the `az acr build` step above) so the new image installs
+`mcp` (in `azure_app/requirements.txt`) and picks up the setting on restart. A remote
+MCP client connects to `https://<your-app-name>.azurewebsites.net/mcp/` with header
+`Authorization: Bearer <the MCP_SERVER_TOKEN value>`.
+
+This makes `triage_log` (which spends this app's Claude subscription per call) and the
+findings-dashboard tools reachable from the public internet for as long as the app is
+up, gated only by that one bearer token - there is no per-user login the way the
+dashboard has. Leave `MCP_SERVER_TOKEN` unset to leave `/mcp` unmounted (a plain 404)
+if you don't need this. See `../mcp_server.py`'s module docstring and
+`../CLAUDE.md`'s "MCP server" section for the same tradeoff as running it locally in
+`--transport http` mode, just permanent instead of ad hoc.

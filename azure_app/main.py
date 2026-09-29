@@ -353,3 +353,40 @@ def adf_drain(x_adf_secret: str = Header(default="")) -> dict:
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+# Optional: mount the MCP server (../mcp_server.py) at /mcp for a remote MCP
+# client, gated by the same bearer-token guard mcp_server.py's own --transport
+# http mode uses. Only mounted when MCP_SERVER_TOKEN is set on this app, so a
+# deployment that never configures it leaves /mcp unmounted (404) and nothing
+# else here changes. See CLAUDE.md's "MCP server" section and mcp_server.py's
+# module docstring for the security tradeoff before setting this: once
+# mounted, this route is internet-reachable for as long as the app is up, and
+# every call to its triage_log tool spends this app's Claude subscription.
+_mcp_token = os.environ.get("MCP_SERVER_TOKEN", "")
+if _mcp_token:
+    try:
+        from contextlib import AsyncExitStack, asynccontextmanager
+
+        import mcp_server as _mcp_server
+
+        # streamable_http_path="/" so the sub-app's own route is at its mount
+        # root - otherwise app.mount("/mcp", ...) on a sub-app whose own route
+        # is *also* "/mcp" would only answer at "/mcp/mcp".
+        _mcp_raw_app = _mcp_server.mcp.streamable_http_app(streamable_http_path="/")
+
+        # app.mount() forwards HTTP requests to a sub-app but NOT its ASGI
+        # lifespan, so the MCP session manager (started via the sub-app's own
+        # `lifespan=`) would otherwise never run and every request would fail.
+        # Combine it into this app's own lifespan instead - see the MCP SDK's
+        # "mounting to an existing ASGI server" guidance.
+        @asynccontextmanager
+        async def _lifespan(_app: FastAPI):
+            async with AsyncExitStack() as stack:
+                await stack.enter_async_context(_mcp_raw_app.router.lifespan_context(_mcp_raw_app))
+                yield
+
+        app.router.lifespan_context = _lifespan
+        app.mount("/mcp", _mcp_server._bearer_token_guard(_mcp_raw_app, _mcp_token))
+    except Exception as e:  # noqa: BLE001 - the triage form must work either way
+        print(f"note: MCP server not mounted: {e}", file=sys.stderr)
