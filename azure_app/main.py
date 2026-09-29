@@ -370,10 +370,30 @@ if _mcp_token:
 
         import mcp_server as _mcp_server
 
+        # The SDK auto-enables a DNS-rebinding Host-header allowlist limited to
+        # localhost/127.0.0.1/::1 whenever streamable_http_app()'s host param
+        # is left at that default - which would reject every real request here,
+        # since this app is reached by its real azurewebsites.net hostname, not
+        # localhost. Rather than disabling that protection, explicitly allow
+        # this app's own hostname too (WEBSITE_HOSTNAME is set automatically by
+        # Azure App Service), keeping the allowlist in place and scoped.
+        _website_host = os.environ.get("WEBSITE_HOSTNAME", "")
+        _transport_security = None
+        if _website_host:
+            from mcp.server.streamable_http import TransportSecuritySettings
+
+            _transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=[_website_host, "127.0.0.1:*", "localhost:*"],
+                allowed_origins=[f"https://{_website_host}",
+                                "http://127.0.0.1:*", "http://localhost:*"],
+            )
+
         # streamable_http_path="/" so the sub-app's own route is at its mount
         # root - otherwise app.mount("/mcp", ...) on a sub-app whose own route
         # is *also* "/mcp" would only answer at "/mcp/mcp".
-        _mcp_raw_app = _mcp_server.mcp.streamable_http_app(streamable_http_path="/")
+        _mcp_raw_app = _mcp_server.mcp.streamable_http_app(
+            streamable_http_path="/", transport_security=_transport_security)
 
         # app.mount() forwards HTTP requests to a sub-app but NOT its ASGI
         # lifespan, so the MCP session manager (started via the sub-app's own

@@ -35,13 +35,18 @@ login of their own, so this mode is gated behind a shared bearer token that
 MUST be set first:
 
     export MCP_SERVER_TOKEN=$(python -c "import secrets; print(secrets.token_hex(32))")
-    python mcp_server.py --transport http --host 0.0.0.0 --port 8765
+    python mcp_server.py --transport http --host 0.0.0.0 --port 8765 \
+        --public-host <the hostname or IP a remote client will actually use>
 
-A remote client then connects to http://<this-machine>:8765/mcp with header
+A remote client then connects to http://<public-host>:8765/mcp with header
 `Authorization: Bearer <the same MCP_SERVER_TOKEN value>`. The server refuses
-to start in http mode without MCP_SERVER_TOKEN set. Keep --host at its default
-(127.0.0.1) unless you specifically need another machine to reach it; binding
-0.0.0.0 (or a LAN/public IP) exposes it to anyone who can reach that address
+to start in http mode without MCP_SERVER_TOKEN set. --public-host is required
+whenever --host isn't localhost - the SDK's own DNS-rebinding protection
+otherwise rejects every request with "Invalid Host header", since it only
+trusts localhost hostnames by default; --public-host allow-lists the real one
+instead of disabling that protection. Keep --host at its default (127.0.0.1)
+unless you specifically need another machine to reach it; binding 0.0.0.0
+(or a LAN/public IP) exposes it to anyone who can reach that address
 and knows or guesses the token, so use a long random token, not a short or
 guessable one, and treat it like any other credential (never commit it).
 """
@@ -194,7 +199,7 @@ def _bearer_token_guard(app, token: str):
     return guarded
 
 
-def _run_http(host: str, port: int) -> None:
+def _run_http(host: str, port: int, public_host: str = "") -> None:
     """Serve over HTTP for a remote MCP client - see this module's docstring
     for the security tradeoff. Refuses to start without MCP_SERVER_TOKEN."""
     token = os.environ.get("MCP_SERVER_TOKEN", "")
@@ -206,14 +211,38 @@ def _run_http(host: str, port: int) -> None:
             file=sys.stderr,
         )
         raise SystemExit(1)
+
+    # The SDK auto-enables a DNS-rebinding Host-header allowlist limited to
+    # localhost/127.0.0.1/::1 whenever streamable_http_app()'s own host param
+    # is left at that default. Binding to something else (e.g. 0.0.0.0) means
+    # real requests arrive with a different Host header and would otherwise
+    # all be rejected with "Invalid Host header" - so --public-host explicitly
+    # allow-lists the hostname/IP a remote client actually connects to,
+    # keeping the protection in place and scoped rather than disabling it.
+    transport_security = None
     if host not in ("127.0.0.1", "localhost", "::1"):
         print(f"warning: binding to {host} exposes this server to more than just this "
               "machine - make sure that is intended and MCP_SERVER_TOKEN is a long, "
               "random value.", file=sys.stderr)
+        if public_host:
+            from mcp.server.streamable_http import TransportSecuritySettings
+
+            transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=[public_host, f"{public_host}:{port}",
+                              "127.0.0.1:*", "localhost:*"],
+                allowed_origins=[f"http://{public_host}:{port}", f"https://{public_host}",
+                                "http://127.0.0.1:*", "http://localhost:*"],
+            )
+        else:
+            print("warning: pass --public-host <hostname-or-ip> too, or every remote "
+                  "request will fail with 'Invalid Host header' - the SDK's allowlist "
+                  "otherwise only accepts localhost.", file=sys.stderr)
 
     import uvicorn
 
-    app = _bearer_token_guard(mcp.streamable_http_app(), token)
+    app = _bearer_token_guard(
+        mcp.streamable_http_app(transport_security=transport_security), token)
     uvicorn.run(app, host=host, port=port)
 
 
@@ -226,9 +255,13 @@ if __name__ == "__main__":
                              "itself. http: serve over the network - see module docstring.")
     parser.add_argument("--host", default="127.0.0.1", help="--transport http only")
     parser.add_argument("--port", type=int, default=8765, help="--transport http only")
+    parser.add_argument("--public-host", default="",
+                        help="--transport http only, required if --host isn't localhost: "
+                             "the hostname or IP a remote client actually connects to, "
+                             "allow-listed against the SDK's Host-header check.")
     args = parser.parse_args()
 
     if args.transport == "stdio":
         mcp.run()
     else:
-        _run_http(args.host, args.port)
+        _run_http(args.host, args.port, args.public_host)
