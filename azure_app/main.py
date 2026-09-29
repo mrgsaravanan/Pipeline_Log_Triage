@@ -378,6 +378,7 @@ if _mcp_token:
         # this app's own hostname too (WEBSITE_HOSTNAME is set automatically by
         # Azure App Service), keeping the allowlist in place and scoped.
         _website_host = os.environ.get("WEBSITE_HOSTNAME", "")
+        print(f"note: MCP mount using WEBSITE_HOSTNAME={_website_host!r}", file=sys.stderr)
         _transport_security = None
         if _website_host:
             from mcp.server.streamable_http import TransportSecuritySettings
