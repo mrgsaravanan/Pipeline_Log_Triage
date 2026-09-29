@@ -207,6 +207,16 @@ const store = {
 // Same server that serves this page by default; a cookie only works same-origin.
 const BACKEND = location.protocol.startsWith("http") ? "" : store.get("backend", "http://localhost:8000");
 
+// Pre-fill the login form for convenience. The username is a fixed default (no
+// secret, fine to ship in the page); the password is never put in the page's own
+// source - it lives only in this browser's localStorage, written once the first
+// time this browser signs in successfully, and read back on later visits. It
+// never leaves this device and is never sent anywhere except the normal /api/login
+// call the person themselves triggers by clicking Sign in.
+const DEFAULT_USER = "priya.platform";
+const REMEMBERED_USER_KEY = "triage_dashboard_user";
+const REMEMBERED_PASS_KEY = "triage_dashboard_pass";
+
 let me = null, teams = [], findings = [], selected = null;
 
 async function api(path, opts = {}) {
@@ -301,13 +311,24 @@ function toLocalInput(t) {
 function show(view) {
   $("loginView").hidden = view !== "login";
   $("appView").hidden = view !== "app";
+  if (view === "login") {
+    // Pre-fill: username defaults to DEFAULT_USER, password only if this
+    // browser has signed in successfully before (see login()).
+    if (!$("user").value) $("user").value = store.get(REMEMBERED_USER_KEY, DEFAULT_USER);
+    if (!$("pass").value) $("pass").value = store.get(REMEMBERED_PASS_KEY, "");
+  }
 }
 
 async function login() {
   $("loginErr").textContent = "";
+  const username = $("user").value, password = $("pass").value;
   try {
     me = await api("/api/login", { method: "POST",
-      body: JSON.stringify({ username: $("user").value, password: $("pass").value }) });
+      body: JSON.stringify({ username, password }) });
+    // Remember on this device only, so the fields are pre-filled next time -
+    // never sent anywhere but the /api/login call just above.
+    store.set(REMEMBERED_USER_KEY, username);
+    store.set(REMEMBERED_PASS_KEY, password);
     $("pass").value = "";
     await start();
   } catch (e) { $("loginErr").textContent = e.message; }
