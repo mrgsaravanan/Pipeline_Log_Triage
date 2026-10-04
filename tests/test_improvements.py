@@ -137,3 +137,21 @@ def test_rate_limit_is_per_caller_and_slides(monkeypatch):
     assert azure._rate_limited("a", now=2)
     assert not azure._rate_limited("b", now=2)
     assert not azure._rate_limited("a", now=100)
+
+
+def test_signature_matches_reworded_titles_with_same_evidence():
+    a = triage_db.failure_signature(
+        "Source table missing", "schema_drift",
+        "Error: 'SourceTableMissing: Simulated failure: source table sales_daily not found "
+        "in schema staging (row count check returned 0)'")
+    b = triage_db.failure_signature(
+        "Missing source table", "schema_drift",
+        "source table sales_daily not found in schema staging (row count check returned 0)")
+    assert a == b
+    assert a != triage_db.failure_signature(
+        "Missing source table", "schema_drift", "source table orders not found in schema staging")
+
+
+def test_signature_falls_back_to_title_without_evidence():
+    assert (triage_db.failure_signature("Task 1 timed out", "infra")
+            == triage_db.failure_signature("Task 2 timed out", "infra", ""))

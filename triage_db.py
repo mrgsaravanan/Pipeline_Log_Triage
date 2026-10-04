@@ -114,11 +114,37 @@ def priority_for(index: int, severity: str | None = None) -> tuple[str, str]:
     return priority, severity
 
 
-def failure_signature(failure_type: str, category: str) -> str:
-    """Stable id for 'the same failure again': the label with numbers/ids stripped."""
-    label = re.sub(r"[0-9a-f]{8,}|\d+", "#", failure_type.lower())
-    label = re.sub(r"\W+", " ", label).strip()
+def _normalise(text: str) -> str:
+    text = re.sub(r"[0-9a-f]{8,}|\d+", "#", text.lower())
+    return re.sub(r"\W+", " ", text).strip()
+
+
+def failure_signature(failure_type: str, category: str, evidence: str = "") -> str:
+    """Stable id for 'the same failure again'.
+
+    Keyed on the log's own error text (evidence) rather than the model's title,
+    which is reworded between runs ("Source table missing" vs "Missing source
+    table"). Wrapper prefixes like `Error: 'SourceTableMissing: Simulated
+    failure: ` are dropped by keeping the text after the last ': '. Falls back
+    to the title when there is no usable evidence.
+    """
+    message = (evidence or "").strip().strip("'\"")
+    message = message.rsplit(": ", 1)[-1] if len(message.rsplit(": ", 1)[-1]) >= 15 else message
+    label = _normalise(message) if len(_normalise(message)) >= 10 else _normalise(failure_type)
     return hashlib.sha1(f"{category}|{label}".encode()).hexdigest()[:16]
+
+
+def backfill_signatures(conn) -> int:
+    """Recompute signatures for existing findings with the evidence-based scheme."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, title, category, evidence FROM triage_findings")
+        rows = cur.fetchall()
+        for r in rows:
+            cur.execute("UPDATE triage_findings SET signature = %s WHERE id = %s",
+                        (failure_signature(r["title"], r["category"] or "", r["evidence"] or ""),
+                         r["id"]))
+    conn.commit()
+    return len(rows)
 
 
 # ---------------------------------------------------------------- connection
@@ -171,7 +197,7 @@ def save_run(conn, log_path: str, triage, model: str = "") -> int:
                 getattr(f, "category", ""), f.failure_type, f.what_broke
             )
             priority, severity = priority_for(i, getattr(f, "severity", None))
-            signature = failure_signature(f.failure_type, category)
+            signature = failure_signature(f.failure_type, category, f.evidence)
             team = teams.get(team_name)
             cost = round(float(team["hourly_rate"]) * hours, 2) if team else None
             # Naive default ETA: twice the estimate, to allow for queueing and review.
